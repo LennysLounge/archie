@@ -58,89 +58,14 @@ pub enum Instruction {
     DECW(Register),
     IMM(u16),
 }
-
-pub enum Register {
-    R0,
-    R1,
-    R2,
-    R3,
-    R4,
-    R5,
-    R6,
-    R7,
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    ST,
-    SP,
-    PC,
-}
-impl Register {
-    pub fn id(&self) -> usize {
+impl Instruction {
+    pub fn encode(&self, output: &mut Vec<u16>) {
         match self {
-            Register::R0 => 0,
-            Register::R1 => 1,
-            Register::R2 => 2,
-            Register::R3 => 3,
-            Register::R4 => 4,
-            Register::R5 => 5,
-            Register::R6 => 6,
-            Register::R7 => 7,
-            Register::R8 => 7,
-            Register::R9 => 9,
-            Register::R10 => 10,
-            Register::R11 => 11,
-            Register::R12 => 12,
-            Register::ST => 13,
-            Register::SP => 14,
-            Register::PC => 15,
-        }
-    }
-    pub fn as_first_param(&self) -> u16 {
-        (self.id() as u16) << 4
-    }
-    pub fn as_second_param(&self) -> u16 {
-        self.id() as u16
-    }
-}
-
-pub enum Address {
-    Indirect(Register),
-    PostIncrement(Register),
-    PreDecrement(Register),
-    Offset(Register, u16),
-}
-impl Address {
-    fn register(&self) -> &Register {
-        match self {
-            Address::Indirect(register) => register,
-            Address::PostIncrement(register) => register,
-            Address::PreDecrement(register) => register,
-            Address::Offset(register, _) => register,
-        }
-    }
-    fn mode(&self) -> u16 {
-        match self {
-            Address::Indirect(_) => 0x0000,
-            Address::PostIncrement(_) => 0x0100,
-            Address::PreDecrement(_) => 0x0200,
-            Address::Offset(_, _) => 0x0300,
-        }
-    }
-}
-
-pub fn to_bytes(program: Vec<Instruction>) -> Vec<u16> {
-    let mut output = Vec::new();
-
-    for inst in program {
-        match inst {
             Instruction::NOP => {
                 output.push(0x0000);
             }
             Instruction::CALL_IMM(_) => todo!(),
-            Instruction::CALL_REG(register) => todo!(),
+            Instruction::CALL_REG(_register) => todo!(),
             Instruction::RET => todo!(),
             Instruction::INT(_) => todo!(),
             Instruction::IRET => todo!(),
@@ -160,7 +85,7 @@ pub fn to_bytes(program: Vec<Instruction>) -> Vec<u16> {
                         + address.register().as_second_param(),
                 );
                 if let Address::Offset(_, offset) = address {
-                    output.push(offset);
+                    output.push(*offset);
                 }
             }
             Instruction::LDB(dst, address) => {
@@ -171,7 +96,7 @@ pub fn to_bytes(program: Vec<Instruction>) -> Vec<u16> {
                         + address.register().as_second_param(),
                 );
                 if let Address::Offset(_, offset) = address {
-                    output.push(offset);
+                    output.push(*offset);
                 }
             }
             Instruction::LDS(dst, address) => {
@@ -182,7 +107,7 @@ pub fn to_bytes(program: Vec<Instruction>) -> Vec<u16> {
                         + address.register().as_second_param(),
                 );
                 if let Address::Offset(_, offset) = address {
-                    output.push(offset);
+                    output.push(*offset);
                 }
             }
             Instruction::LRW(dst, address) => {
@@ -193,7 +118,7 @@ pub fn to_bytes(program: Vec<Instruction>) -> Vec<u16> {
                         + address.register().as_second_param(),
                 );
                 if let Address::Offset(_, offset) = address {
-                    output.push(offset);
+                    output.push(*offset);
                 }
             }
             Instruction::LRB(dst, address) => {
@@ -204,7 +129,7 @@ pub fn to_bytes(program: Vec<Instruction>) -> Vec<u16> {
                         + address.register().as_second_param(),
                 );
                 if let Address::Offset(_, offset) = address {
-                    output.push(offset);
+                    output.push(*offset);
                 }
             }
             Instruction::LRS(dst, address) => {
@@ -215,7 +140,7 @@ pub fn to_bytes(program: Vec<Instruction>) -> Vec<u16> {
                         + address.register().as_second_param(),
                 );
                 if let Address::Offset(_, offset) = address {
-                    output.push(offset);
+                    output.push(*offset);
                 }
             }
             Instruction::STW(address, src) => {
@@ -226,7 +151,7 @@ pub fn to_bytes(program: Vec<Instruction>) -> Vec<u16> {
                         + src.as_second_param(),
                 );
                 if let Address::Offset(_, offset) = address {
-                    output.push(offset);
+                    output.push(*offset);
                 }
             }
             Instruction::STB(address, src) => {
@@ -237,18 +162,18 @@ pub fn to_bytes(program: Vec<Instruction>) -> Vec<u16> {
                         + src.as_second_param(),
                 );
                 if let Address::Offset(_, offset) = address {
-                    output.push(offset);
+                    output.push(*offset);
                 }
             }
             Instruction::LDI_IMM(dst, v) => {
                 output.push(0x4000 + dst.as_first_param());
-                output.push(v);
+                output.push(*v);
             }
             Instruction::LDI_POS(dst, v) => {
-                output.push(0x4100 + dst.as_first_param() + u16::from(v));
+                output.push(0x4100 + dst.as_first_param() + u16::from(*v));
             }
             Instruction::LDI_NEG(dst, v) => {
-                output.push(0x4200 + dst.as_first_param() + u16::from(v));
+                output.push(0x4200 + dst.as_first_param() + u16::from(*v));
             }
             Instruction::MOV(dst, src) => {
                 output.push(0x4300 + dst.as_first_param() + src.as_second_param());
@@ -261,43 +186,43 @@ pub fn to_bytes(program: Vec<Instruction>) -> Vec<u16> {
             }
             Instruction::JMP_IMM(addr) => {
                 output.push(0x5000);
-                output.push(addr);
+                output.push(*addr);
             }
             Instruction::JMP_REG(src) => {
                 output.push(0x5100 + src.as_first_param());
             }
             Instruction::JMP_OFF(offset) => {
-                output.push(0x5200 + (offset as u8) as u16);
+                output.push(0x5200 + (*offset as u8) as u16);
             }
             Instruction::JE(offset) => {
-                output.push(0x5300 + (offset as u8) as u16);
+                output.push(0x5300 + (*offset as u8) as u16);
             }
             Instruction::JNE(offset) => {
-                output.push(0x5400 + (offset as u8) as u16);
+                output.push(0x5400 + (*offset as u8) as u16);
             }
             Instruction::JL(offset) => {
-                output.push(0x5500 + (offset as u8) as u16);
+                output.push(0x5500 + (*offset as u8) as u16);
             }
             Instruction::JLE(offset) => {
-                output.push(0x5600 + (offset as u8) as u16);
+                output.push(0x5600 + (*offset as u8) as u16);
             }
             Instruction::JG(offset) => {
-                output.push(0x5700 + (offset as u8) as u16);
+                output.push(0x5700 + (*offset as u8) as u16);
             }
             Instruction::JGE(offset) => {
-                output.push(0x5800 + (offset as u8) as u16);
+                output.push(0x5800 + (*offset as u8) as u16);
             }
             Instruction::JB(offset) => {
-                output.push(0x5900 + (offset as u8) as u16);
+                output.push(0x5900 + (*offset as u8) as u16);
             }
             Instruction::JBE(offset) => {
-                output.push(0x5A00 + (offset as u8) as u16);
+                output.push(0x5A00 + (*offset as u8) as u16);
             }
             Instruction::JA(offset) => {
-                output.push(0x5B00 + (offset as u8) as u16);
+                output.push(0x5B00 + (*offset as u8) as u16);
             }
             Instruction::JAE(offset) => {
-                output.push(0x5C00 + (offset as u8) as u16);
+                output.push(0x5C00 + (*offset as u8) as u16);
             }
             Instruction::ADD(a, b) => {
                 output.push(0x6000 + a.as_first_param() + b.as_second_param());
@@ -350,11 +275,90 @@ pub fn to_bytes(program: Vec<Instruction>) -> Vec<u16> {
             Instruction::DECW(a) => {
                 output.push(0x6F50 + a.as_second_param());
             }
-
             Instruction::IMM(v) => {
-                output.push(v);
+                output.push(*v);
             }
         }
+    }
+}
+
+pub enum Register {
+    R0,
+    R1,
+    R2,
+    R3,
+    R4,
+    R5,
+    R6,
+    R7,
+    R8,
+    R9,
+    R10,
+    R11,
+    R12,
+    ST,
+    SP,
+    PC,
+}
+impl Register {
+    pub fn id(&self) -> usize {
+        match self {
+            Register::R0 => 0,
+            Register::R1 => 1,
+            Register::R2 => 2,
+            Register::R3 => 3,
+            Register::R4 => 4,
+            Register::R5 => 5,
+            Register::R6 => 6,
+            Register::R7 => 7,
+            Register::R8 => 8,
+            Register::R9 => 9,
+            Register::R10 => 10,
+            Register::R11 => 11,
+            Register::R12 => 12,
+            Register::ST => 13,
+            Register::SP => 14,
+            Register::PC => 15,
+        }
+    }
+    pub fn as_first_param(&self) -> u16 {
+        (self.id() as u16) << 4
+    }
+    pub fn as_second_param(&self) -> u16 {
+        self.id() as u16
+    }
+}
+
+pub enum Address {
+    Indirect(Register),
+    PostIncrement(Register),
+    PreDecrement(Register),
+    Offset(Register, u16),
+}
+impl Address {
+    fn register(&self) -> &Register {
+        match self {
+            Address::Indirect(register) => register,
+            Address::PostIncrement(register) => register,
+            Address::PreDecrement(register) => register,
+            Address::Offset(register, _) => register,
+        }
+    }
+    fn mode(&self) -> u16 {
+        match self {
+            Address::Indirect(_) => 0x0000,
+            Address::PostIncrement(_) => 0x0100,
+            Address::PreDecrement(_) => 0x0200,
+            Address::Offset(_, _) => 0x0300,
+        }
+    }
+}
+
+pub fn to_bytes(program: &Vec<Instruction>) -> Vec<u16> {
+    let mut output = Vec::new();
+
+    for inst in program {
+        inst.encode(&mut output);
     }
 
     output

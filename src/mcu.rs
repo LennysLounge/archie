@@ -1,7 +1,4 @@
-use std::{
-    io::{self, Stdout},
-    ops::Shl,
-};
+use std::io::{self, Stdout};
 
 use crossterm::{cursor::MoveTo, queue, style::Print};
 
@@ -710,6 +707,8 @@ impl MCU {
             }
             addr += 8;
         }
+
+        queue!(stdout, MoveTo(45, 14), Print("RAM:"))?;
 
         Ok(())
     }

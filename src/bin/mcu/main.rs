@@ -1,14 +1,15 @@
 #![allow(unused)]
 
-mod isa;
-mod mcu;
-
 use std::{
     io::{self, Stdout, Write},
     panic, thread,
     time::{Duration, Instant},
 };
 
+use archie::{
+    isa::{self, Address::*, Instruction::*, Register::*},
+    mcu::MCU,
+};
 use crossterm::{
     ExecutableCommand, QueueableCommand,
     cursor::{DisableBlinking, Hide, MoveTo},
@@ -18,15 +19,6 @@ use crossterm::{
     terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode},
 };
 use ux::u4;
-
-use crate::{
-    isa::{
-        Address::{self, *},
-        Instruction::{self, *},
-        Register::{self, *},
-    },
-    mcu::MCU,
-};
 
 fn main() -> io::Result<()> {
     enable_raw_mode()?;
@@ -43,16 +35,104 @@ fn main() -> io::Result<()> {
         default_hook(info);
     }));
 
-    let program = isa::to_bytes(vec![
-        LRW(R1, Offset(R0, 5)),
-        IMM(0xABCD),
-        HALT,
-        HALT,
-        HALT,
-        HALT,
-        HALT,
-    ]);
-    let mut mcu = MCU::new(program.clone());
+    let program = vec![
+        // setup variables
+        LDI_POS(R1, u4::new(1)),
+        LDI_POS(R2, u4::new(3)),
+        LDI_POS(R3, u4::new(5)),
+        LDI_IMM(R7, 1000),
+        //
+        DECB(R2),
+        JNE(2),
+        MOV(R4, R1),
+        LDI_POS(R2, u4::new(3)),
+        DECB(R3),
+        JNE(2),
+        MOV(R4, R1),
+        LDI_POS(R3, u4::new(5)),
+        ADD(R5, R4),
+        ADDC(R6, R0),
+        MOV(R4, R0),
+        INCB(R1),
+        CMP(R1, R7),
+        JL(-14),
+    ]; // 11059
+
+    let program = vec![
+        // setup variables
+        LDI_POS(R1, u4::new(1)),
+        LDI_POS(R2, u4::new(3)),
+        LDI_POS(R3, u4::new(5)),
+        LDI_IMM(R7, 1000),
+        //
+        DECB(R2),
+        JNE(7),
+        ADD(R5, R1),
+        ADDC(R6, R0),
+        LDI_POS(R2, u4::new(3)),
+        DECB(R3),
+        JNE(1),
+        LDI_POS(R3, u4::new(5)),
+        JMP_OFF(5),
+        DECB(R3),
+        JNE(3),
+        LDI_POS(R3, u4::new(5)),
+        ADD(R5, R1),
+        ADDC(R6, R0),
+        INCB(R1),
+        CMP(R1, R7),
+        JL(-17),
+    ]; // 8795
+
+    let program = vec![
+        LDI_POS(R1, u4::new(0)),  // i
+        LDI_POS(R2, u4::new(15)), // const
+        LDI_IMM(R3, 1000),        // const
+        // R5 acc1
+        // R6 acc2
+        LDI_IMM(R8, 60),
+        MOV(R4, R1),
+        //
+        ADD(R4, R2),
+        CMP(R4, R3),
+        JGE(13),
+        MOV(R7, R0),
+        ADD(R7, R1),
+        ADD(R7, R1),
+        ADD(R7, R1),
+        ADD(R7, R1),
+        ADD(R7, R1),
+        ADD(R7, R1),
+        ADD(R7, R1),
+        ADD(R7, R8),
+        ADD(R5, R7),
+        ADDC(R6, R0),
+        MOV(R1, R4),
+        JMP_OFF(-16),
+        // DBG,
+        INCB(R1),
+        LDI_POS(R2, u4::new(3)),
+        LDI_POS(R4, u4::new(5)),
+        DECB(R2),
+        JNE(7),
+        ADD(R5, R1),
+        ADDC(R6, R0),
+        LDI_POS(R2, u4::new(3)),
+        DECB(R4),
+        JNE(1),
+        LDI_POS(R4, u4::new(5)),
+        JMP_OFF(5),
+        DECB(R4),
+        JNE(3),
+        LDI_POS(R4, u4::new(5)),
+        ADD(R5, R1),
+        ADDC(R6, R0),
+        INCB(R1),
+        CMP(R1, R3),
+        JL(-17),
+    ]; // 1147
+
+    let mut mcu = MCU::new(isa::to_bytes(&program));
     mcu.set_dbg_flag();
 
     let mut running = true;
@@ -115,6 +195,9 @@ fn main() -> io::Result<()> {
             loop {
                 for _ in 0..1000 {
                     mcu.run_one_cycle();
+                    if mcu.is_dbg_flag_set() {
+                        break;
+                    }
                 }
                 let now = Instant::now();
                 if now.duration_since(start) > Duration::from_millis(10)
