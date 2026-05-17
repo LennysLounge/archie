@@ -1,2 +1,4 @@
-    MOV R1, R2
-
+    JE forward
+    HALT
+forward:
+    HALT

@@ -3,6 +3,7 @@
 use archie::isa::Register;
 use clap::Parser;
 use std::{
+    collections::HashMap,
     env,
     fs::{self, File},
     io::{self, Write},
@@ -24,6 +25,8 @@ fn main() -> io::Result<()> {
     let content = fs::read_to_string(cli.input_file)?;
 
     let mut output: Vec<u16> = Vec::new();
+    let mut labels: HashMap<&str, usize> = HashMap::new();
+    let mut deferred_labels: HashMap<usize, &str> = HashMap::new();
 
     for (line_number, line) in content.lines().enumerate() {
         let token_list = tokenize(line);
@@ -36,20 +39,31 @@ fn main() -> io::Result<()> {
         let is_label = token.peek().is_some_and(|t| *t == ":");
         if is_label {
             token.next();
-            if let Some(unused_token) = token.next() {
-                println!("ERROR line {line_number}: Unexpected token '{unused_token}'");
+            if let Err(msg) = expect_no_more_tokens(&mut token) {
+                println!("ERROR line {line_number}: {msg}");
                 println!("-> {line}");
-                return Ok(());
             }
-            todo!("labels not implemented yet");
+            labels.insert(op, output.len());
+            println!("Added label: {op} at address: {}", output.len());
         } else {
-            match parse_instruction(op, &mut token, &mut output) {
+            match parse_instruction(op, &mut token, &mut output, &labels, &mut deferred_labels) {
                 Err(msg) => {
                     println!("ERROR line {line_number}: {msg}");
                     println!("-> {line}");
                 }
                 Ok(_) => (),
             }
+        }
+    }
+    for (pos, label) in deferred_labels.iter() {
+        if let Some(addr) = labels.get(label) {
+            let imm16 = output
+                .get_mut(*pos)
+                .expect("The position that needs to be filled by the address must exist");
+            *imm16 = (*addr * 2) as u16;
+        } else {
+            println!("ERROR: Unknown label '{label}'");
+            return Ok(());
         }
     }
 
@@ -65,6 +79,8 @@ fn parse_instruction<'a>(
     op: &str,
     token: &mut Peekable<impl Iterator<Item = &'a str> + Clone>,
     output: &mut Vec<u16>,
+    labels: &HashMap<&str, usize>,
+    deferred_labels: &mut HashMap<usize, &'a str>,
 ) -> Result<(), String> {
     match op {
         "NOP" => output.push(0x0000),
@@ -143,11 +159,54 @@ fn parse_instruction<'a>(
             RegisterOrLabel::Register(reg) => {
                 output.push(0x5100 + (u16::from(reg) << 4));
             }
-            RegisterOrLabel::Label(_) => todo!(),
+            RegisterOrLabel::Label(label) => {
+                let target_addr = labels.get(label);
+                if let Some(addr) = target_addr {
+                    let offset = *addr as isize - output.len() as isize - 1;
+                    if offset >= -128 {
+                        output.push(0x5200 + (offset as u16 & 0x00FF));
+                    } else {
+                        output.push(0x5000);
+                        output.push((*addr * 2) as u16);
+                    }
+                } else {
+                    output.push(0x5000);
+                    output.push(0u16);
+                    deferred_labels.insert(output.len() - 1, label);
+                }
+            }
         },
         "JE" | "JNE" | "JL" | "JLE" | "JG" | "JGE" | "JB" | "JBE" | "JA" | "JAE" => {
+            let (inst, inverse) = match op {
+                "JE" => (0x5300, 0x5400),
+                "JNE" => (0x5400, 0x5300),
+                "JL" => (0x5500, 0x5800),
+                "JLE" => (0x5600, 0x5700),
+                "JG" => (0x5700, 0x5600),
+                "JGE" => (0x5800, 0x5500),
+                "JB" => (0x5900, 0x5C00),
+                "JBE" => (0x5A00, 0x5B00),
+                "JA" => (0x5B00, 0x5A00),
+                "JAE" => (0x5C00, 0x5900),
+                _ => unreachable!(),
+            };
             let label = parse_label_terminating(token)?;
-            todo!();
+            let target_addr = labels.get(label);
+            if let Some(addr) = target_addr {
+                let offset = *addr as isize - output.len() as isize - 1;
+                if offset >= -128 {
+                    output.push(inst + (offset as u16 & 0x00FF));
+                } else {
+                    output.push(inverse + 0x0001);
+                    output.push(0x5000);
+                    output.push((*addr * 2) as u16);
+                }
+            } else {
+                output.push(inverse + 0x0001);
+                output.push(0x5000);
+                output.push(0u16);
+                deferred_labels.insert(output.len() - 1, label);
+            }
         }
         "ADD" => {
             let (dst, src) = parse_two_registers(token)?;
@@ -399,19 +458,20 @@ fn parse_register_or_label<'a>(
     token: &mut Peekable<impl Iterator<Item = &'a str> + Clone>,
 ) -> Result<RegisterOrLabel<'a>, String> {
     let mut attempt = token.clone();
-    if let Ok(reg) = parse_register(token) {
+    if let Ok(reg) = parse_register(&mut attempt) {
         *token = attempt;
         expect_no_more_tokens(token)?;
         return Ok(RegisterOrLabel::Register(reg));
     };
     let mut attempt = token.clone();
-    if let Ok(label) = parse_label(token) {
+    if let Ok(label) = parse_label(&mut attempt) {
         *token = attempt;
         expect_no_more_tokens(token)?;
         return Ok(RegisterOrLabel::Label(label));
     };
+    println!("next token: {:?}", token.peek());
     Err(format!(
-        "Expected either a register or a label bit value but got neither"
+        "Expected either a register or a label but got neither"
     ))
 }
 
