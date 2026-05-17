@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
 crossterm = "0.29.0"
 ux = "0.1.6"
 
 [[bin]]
-name = "compiler"
+name = "assembler"
