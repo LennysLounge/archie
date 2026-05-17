@@ -1,8 +1,11 @@
 #![allow(unused)]
 
 use std::{
+    fs,
     io::{self, Stdout, Write},
-    panic, thread,
+    panic,
+    path::{Path, PathBuf},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -10,6 +13,7 @@ use archie::{
     isa::{self, Address::*, Instruction::*, Register::*},
     mcu::MCU,
 };
+use clap::Parser;
 use crossterm::{
     ExecutableCommand, QueueableCommand,
     cursor::{DisableBlinking, Hide, MoveTo},
@@ -20,7 +24,17 @@ use crossterm::{
 };
 use ux::u4;
 
+#[derive(Parser, Debug)]
+struct Cli {
+    #[arg(help = "The file to be assembled")]
+    input_file: PathBuf,
+}
+
 fn main() -> io::Result<()> {
+    let cli = Cli::parse();
+
+    let program = read_file_as_u16(&cli.input_file)?;
+
     enable_raw_mode()?;
     get_next_key()?;
 
@@ -35,104 +49,7 @@ fn main() -> io::Result<()> {
         default_hook(info);
     }));
 
-    let program = vec![
-        // setup variables
-        LDI_POS(R1, u4::new(1)),
-        LDI_POS(R2, u4::new(3)),
-        LDI_POS(R3, u4::new(5)),
-        LDI_IMM(R7, 1000),
-        //
-        DECB(R2),
-        JNE(2),
-        MOV(R4, R1),
-        LDI_POS(R2, u4::new(3)),
-        DECB(R3),
-        JNE(2),
-        MOV(R4, R1),
-        LDI_POS(R3, u4::new(5)),
-        ADD(R5, R4),
-        ADDC(R6, R0),
-        MOV(R4, R0),
-        INCB(R1),
-        CMP(R1, R7),
-        JL(-14),
-    ]; // 11059
-
-    let program = vec![
-        // setup variables
-        LDI_POS(R1, u4::new(1)),
-        LDI_POS(R2, u4::new(3)),
-        LDI_POS(R3, u4::new(5)),
-        LDI_IMM(R7, 1000),
-        //
-        DECB(R2),
-        JNE(7),
-        ADD(R5, R1),
-        ADDC(R6, R0),
-        LDI_POS(R2, u4::new(3)),
-        DECB(R3),
-        JNE(1),
-        LDI_POS(R3, u4::new(5)),
-        JMP_OFF(5),
-        DECB(R3),
-        JNE(3),
-        LDI_POS(R3, u4::new(5)),
-        ADD(R5, R1),
-        ADDC(R6, R0),
-        INCB(R1),
-        CMP(R1, R7),
-        JL(-17),
-    ]; // 8795
-
-    let program = vec![
-        LDI_POS(R1, u4::new(0)),  // i
-        LDI_POS(R2, u4::new(15)), // const
-        LDI_IMM(R3, 1000),        // const
-        // R5 acc1
-        // R6 acc2
-        LDI_IMM(R8, 60),
-        MOV(R4, R1),
-        //
-        ADD(R4, R2),
-        CMP(R4, R3),
-        JGE(13),
-        MOV(R7, R0),
-        ADD(R7, R1),
-        ADD(R7, R1),
-        ADD(R7, R1),
-        ADD(R7, R1),
-        ADD(R7, R1),
-        ADD(R7, R1),
-        ADD(R7, R1),
-        ADD(R7, R8),
-        ADD(R5, R7),
-        ADDC(R6, R0),
-        MOV(R1, R4),
-        JMP_OFF(-16),
-        // DBG,
-        INCB(R1),
-        LDI_POS(R2, u4::new(3)),
-        LDI_POS(R4, u4::new(5)),
-        DECB(R2),
-        JNE(7),
-        ADD(R5, R1),
-        ADDC(R6, R0),
-        LDI_POS(R2, u4::new(3)),
-        DECB(R4),
-        JNE(1),
-        LDI_POS(R4, u4::new(5)),
-        JMP_OFF(5),
-        DECB(R4),
-        JNE(3),
-        LDI_POS(R4, u4::new(5)),
-        ADD(R5, R1),
-        ADDC(R6, R0),
-        INCB(R1),
-        CMP(R1, R3),
-        JL(-17),
-    ]; // 1147
-
-    let mut mcu = MCU::new(isa::to_bytes(&program));
+    let mut mcu = MCU::new(program);
     mcu.set_dbg_flag();
 
     let mut running = true;
@@ -224,4 +141,22 @@ fn get_next_key() -> io::Result<Option<KeyEvent>> {
         }
     }
     Ok(None)
+}
+
+fn read_file_as_u16(path: &impl AsRef<Path>) -> io::Result<Vec<u16>> {
+    let bytes = fs::read(path)?;
+
+    if bytes.len() % 2 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "File length is not a multiple of 2",
+        ));
+    }
+
+    let vec_u16 = bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
+
+    Ok(vec_u16)
 }

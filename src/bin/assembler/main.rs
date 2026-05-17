@@ -8,6 +8,7 @@ use std::{
     fs::{self, File},
     io::{self, Write},
     iter::Peekable,
+    path::{Path, PathBuf},
 };
 use ux::u4;
 
@@ -16,13 +17,13 @@ mod ast;
 #[derive(Parser, Debug)]
 struct Cli {
     #[arg(help = "The file to be assembled")]
-    input_file: String,
+    input_file: PathBuf,
 }
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    let content = fs::read_to_string(cli.input_file)?;
+    let content = fs::read_to_string(&cli.input_file)?;
 
     let mut output: Vec<u16> = Vec::new();
     let mut labels: HashMap<&str, usize> = HashMap::new();
@@ -42,14 +43,15 @@ fn main() -> io::Result<()> {
             if let Err(msg) = expect_no_more_tokens(&mut token) {
                 println!("ERROR line {line_number}: {msg}");
                 println!("-> {line}");
+                return Ok(());
             }
             labels.insert(op, output.len());
-            println!("Added label: {op} at address: {}", output.len());
         } else {
             match parse_instruction(op, &mut token, &mut output, &labels, &mut deferred_labels) {
                 Err(msg) => {
                     println!("ERROR line {line_number}: {msg}");
                     println!("-> {line}");
+                    return Ok(());
                 }
                 Ok(_) => (),
             }
@@ -67,7 +69,10 @@ fn main() -> io::Result<()> {
         }
     }
 
-    let mut out_file = File::create("out.bin")?;
+    let mut output_file = cli.input_file.clone();
+    output_file.set_extension("bin");
+
+    let mut out_file = File::create(output_file)?;
     for inst in output {
         out_file.write_all(&inst.to_le_bytes());
     }

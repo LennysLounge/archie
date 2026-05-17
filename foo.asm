@@ -1,4 +1,1 @@
-    JE forward
-    HALT
-forward:
-    HALT
+    LDI R1, 1
