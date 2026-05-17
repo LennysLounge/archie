@@ -12,7 +12,9 @@ use std::{
 };
 use ux::u4;
 
-mod ast;
+use crate::token::{Token, TokenValue, tokenize};
+
+mod token;
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -30,32 +32,42 @@ fn main() -> io::Result<()> {
     let mut deferred_labels: HashMap<usize, &str> = HashMap::new();
 
     for (line_number, line) in content.lines().enumerate() {
-        let token_list = tokenize(line);
-        let mut token = token_list.iter().map(|x| *x).peekable();
-
-        let Some(op) = token.next() else {
-            continue;
-        };
-
-        let is_label = token.peek().is_some_and(|t| *t == ":");
-        if is_label {
-            token.next();
-            if let Err(msg) = expect_no_more_tokens(&mut token) {
-                println!("ERROR line {line_number}: {msg}");
+        let mut token_list = match tokenize(line) {
+            Ok(l) => l,
+            Err(msg) => {
+                println!("ERROR lien {line_number}: {msg}");
                 println!("-> {line}");
                 return Ok(());
             }
-            labels.insert(op, output.len());
-        } else {
-            match parse_instruction(op, &mut token, &mut output, &labels, &mut deferred_labels) {
-                Err(msg) => {
-                    println!("ERROR line {line_number}: {msg}");
-                    println!("-> {line}");
-                    return Ok(());
-                }
-                Ok(_) => (),
-            }
-        }
+        };
+
+        let mut token = token_list.iter().peekable();
+
+        parse_line(&mut token, &mut output, &mut labels, &mut deferred_labels);
+
+        // let Some(op) = token.next() else {
+        //     continue;
+        // };
+
+        // let is_label = token.peek().is_some_and(|t| *t == ":");
+        // if is_label {
+        //     token.next();
+        //     if let Err(msg) = expect_no_more_tokens(&mut token) {
+        //         println!("ERROR line {line_number}: {msg}");
+        //         println!("-> {line}");
+        //         return Ok(());
+        //     }
+        //     labels.insert(op, output.len());
+        // } else {
+        //     match parse_instruction(op, &mut token, &mut output, &labels, &mut deferred_labels) {
+        //         Err(msg) => {
+        //             println!("ERROR line {line_number}: {msg}");
+        //             println!("-> {line}");
+        //             return Ok(());
+        //         }
+        //         Ok(_) => (),
+        //     }
+        // }
     }
     for (pos, label) in deferred_labels.iter() {
         if let Some(addr) = labels.get(label) {
@@ -80,14 +92,32 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn parse_instruction<'a>(
-    op: &str,
-    token: &mut Peekable<impl Iterator<Item = &'a str> + Clone>,
+fn parse_line<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>> + Clone>,
     output: &mut Vec<u16>,
-    labels: &HashMap<&str, usize>,
-    deferred_labels: &mut HashMap<usize, &'a str>,
+    labels: &mut HashMap<&'l str, usize>,
+    deferred_labels: &mut HashMap<usize, &'l str>,
 ) -> Result<(), String> {
-    match op {
+    let Some(t) = token.next() else {
+        return Ok(());
+    };
+    let TokenValue::Text(token_text) = t.value else {
+        return Err(format!(
+            "Invalid start to line. Expected an instruction or a label definition."
+        ));
+    };
+
+    let is_label = token
+        .peek()
+        .is_some_and(|t| matches!(t.value, TokenValue::Symbol(":")));
+    if is_label {
+        token.next();
+        expect_no_more_tokens(token)?;
+        labels.insert(token_text, output.len());
+        return Ok(());
+    }
+
+    match token_text {
         "NOP" => output.push(0x0000),
         "CALL" => match parse_register_or_u16(token)? {
             RegisterOrU16::Register(reg) => {
@@ -109,7 +139,7 @@ fn parse_instruction<'a>(
         "DBG" => output.push(0x00BB),
         "HALT" => output.push(0x0FFF),
         "LDW" | "LDB" | "LDS" | "LRW" | "LRB" | "LRS" => {
-            let base_op = match op {
+            let base_op = match token_text {
                 "LDW" => 0x1000,
                 "LDB" => 0x1400,
                 "LDS" => 0x1C00,
@@ -125,7 +155,7 @@ fn parse_instruction<'a>(
             }
         }
         "STW" | "STB" => {
-            let base_op = match op {
+            let base_op = match token_text {
                 "STW" => 0x3000,
                 "STB" => 0x3400,
                 _ => unreachable!(),
@@ -182,7 +212,7 @@ fn parse_instruction<'a>(
             }
         },
         "JE" | "JNE" | "JL" | "JLE" | "JG" | "JGE" | "JB" | "JBE" | "JA" | "JAE" => {
-            let (inst, inverse) = match op {
+            let (inst, inverse) = match token_text {
                 "JE" => (0x5300, 0x5400),
                 "JNE" => (0x5400, 0x5300),
                 "JL" => (0x5500, 0x5800),
@@ -282,64 +312,49 @@ fn parse_instruction<'a>(
             output.push(0x6F50 + u16::from(src));
         }
         _ => {
-            return Err(format!("Unknown instruction '{op}'"));
+            return Err(format!("Unknown instruction '{token_text}'"));
         }
     }
-    Ok(())
+    expect_no_more_tokens(token)?;
+    return Ok(());
 }
 
-fn tokenize(line: &str) -> Vec<&str> {
-    let mut token = Vec::new();
-    let mut current_token_start = None;
-    for (i, char) in line.char_indices() {
-        if char == ';' {
-            break;
-        }
-        if let Some(token_start) = current_token_start {
-            if char.is_alphanumeric() {
-                continue;
-            } else {
-                token.push(&line[token_start..i]);
-                current_token_start = None;
-            }
-        }
-        if char.is_whitespace() {
-            continue;
-        } else if char.is_alphanumeric() && current_token_start.is_none() {
-            current_token_start = Some(i);
-        } else {
-            token.push(&line[i..=i]);
-        }
-    }
-    if let Some(token_start) = current_token_start {
-        token.push(&line[token_start..]);
-    }
-    token
-}
-
-fn parse_one_register<'a>(
-    token: &mut Peekable<impl Iterator<Item = &'a str>>,
+fn parse_one_register<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>> + Clone>,
 ) -> Result<u4, String> {
     let register = parse_register(token)?;
     expect_no_more_tokens(token)?;
     Ok(register)
 }
 
-fn parse_two_registers<'a>(
-    token: &mut Peekable<impl Iterator<Item = &'a str>>,
+fn parse_two_registers<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>>>,
 ) -> Result<(u4, u4), String> {
     let dst = parse_register(token)?;
-    parse_tag(token, ",")?;
+    parse_symbol(token, ",")?;
     let src = parse_register(token)?;
     expect_no_more_tokens(token)?;
     Ok((dst, src))
 }
 
-fn parse_register<'a>(token: &mut Peekable<impl Iterator<Item = &'a str>>) -> Result<u4, String> {
-    let Some(t) = token.next() else {
-        return Err(format!("Expected a register but got nothing"));
+fn parse_register<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>>>,
+) -> Result<u4, String> {
+    let text = match token.next() {
+        Some(Token {
+            value: TokenValue::Text(text),
+            ..
+        }) => text,
+        Some(Token { original, .. }) => {
+            return Err(format!(
+                "Expected a register name but got '{original}' instead"
+            ));
+        }
+        None => {
+            return Err(format!("Expected a register name but reached end of input"));
+        }
     };
-    let register = match t {
+    let register = match *text {
         "R0" | "r0" => u4::new(0),
         "R1" | "r1" => u4::new(1),
         "R2" | "r2" => u4::new(2),
@@ -356,77 +371,98 @@ fn parse_register<'a>(token: &mut Peekable<impl Iterator<Item = &'a str>>) -> Re
         "R13" | "r13" | "ST" => u4::new(13),
         "R14" | "r14" | "SP" => u4::new(14),
         "R15" | "r15" | "PC" => u4::new(15),
-        _ => return Err(format!("Invalid register '{t}'")),
+        _ => return Err(format!("Invalid register '{text}'")),
     };
     Ok(register)
 }
 
-fn parse_tag<'a>(
-    token: &mut Peekable<impl Iterator<Item = &'a str>>,
-    tag: &str,
+fn parse_symbol<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>>>,
+    symbol: &str,
 ) -> Result<(), String> {
-    let Some(t) = token.next() else {
-        return Err(format!("Expected a '{tag}' but got nothing"));
+    match token.next() {
+        Some(Token {
+            value: TokenValue::Symbol(s),
+            ..
+        }) if *s == symbol => return Ok(()),
+        Some(Token { original, .. }) => {
+            return Err(format!(
+                "Expected symbol '{symbol}' but got '{original}' instead"
+            ));
+        }
+        None => {
+            return Err(format!(
+                "Expected symbol '{symbol}' but reached end of input"
+            ));
+        }
     };
-    if t != tag {
-        return Err(format!("Expected a '{tag}' but got '{t}'"));
-    }
-    Ok(())
 }
 
-fn parse_interrupt<'a>(token: &mut Peekable<impl Iterator<Item = &'a str>>) -> Result<u4, String> {
-    let Some(t) = token.next() else {
-        return Err(format!("Expected an interrupt number but got nothing"));
+fn parse_interrupt<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>>>,
+) -> Result<u4, String> {
+    let number = match token.next() {
+        Some(Token {
+            value: TokenValue::Number(n),
+            ..
+        }) => n,
+        Some(Token { original, .. }) => {
+            return Err(format!(
+                "Expected an interrupt number but got '{original}' instead"
+            ));
+        }
+        None => {
+            return Err(format!(
+                "Expected an interrupt number but reached end of input"
+            ));
+        }
     };
-    let Ok(int_number) = u8::from_str_radix(t, 10)
-        .or_else(|_| u8::from_str_radix(t, 16))
-        .or_else(|_| u8::from_str_radix(t, 8))
-    else {
-        return Err(format!("Expected an interrupt number but got '{t}'"));
-    };
-    let Ok(u4_number) = u4::try_from(int_number) else {
-        return Err(format!("Invalid interrupt number '{int_number}'"));
+    let Ok(u4_number) = u4::try_from(*number as u64) else {
+        return Err(format!("Invalid interrupt number '{number}'"));
     };
     expect_no_more_tokens(token)?;
     Ok(u4_number)
 }
 
-fn parse_register_u16<'a>(
-    token: &mut Peekable<impl Iterator<Item = &'a str>>,
+fn parse_register_u16<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>>>,
 ) -> Result<(u4, u16), String> {
     let dst = parse_register(token)?;
-    parse_tag(token, ",")?;
+    parse_symbol(token, ",")?;
     let value = parse_u16(token)?;
     expect_no_more_tokens(token)?;
     Ok((dst, value))
 }
 
-fn parse_u16<'a>(token: &mut Peekable<impl Iterator<Item = &'a str>>) -> Result<u16, String> {
-    let Some(t) = token.next() else {
-        return Err(format!("Expected a number but got nothing"));
+fn parse_u16<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>>>,
+) -> Result<u16, String> {
+    let value = match token.next() {
+        Some(Token {
+            value: TokenValue::Number(n),
+            ..
+        }) => *n,
+        Some(Token { original, .. }) => {
+            return Err(format!("Expected a number but got '{original}' instead"));
+        }
+        None => return Err("Expected a number but reached end of input".to_owned()),
     };
-    let Ok(int_number) = i32::from_str_radix(t, 10)
-        .or_else(|_| i32::from_str_radix(t, 16))
-        .or_else(|_| i32::from_str_radix(t, 8))
-    else {
-        return Err(format!("Expected a number but got '{t}'"));
-    };
-    if int_number < i16::MIN as i32 || int_number > u16::MAX as i32 {
+    if value < i16::MIN as i64 || value > u16::MAX as i64 {
         return Err(format!(
-            "Value '{int_number}' does not fit in the 16 bit value range from {} to {}",
+            "Value '{value}' does not fit in the 16 bit value range from {} to {}",
             i16::MIN,
             u16::MAX
         ));
     }
-    Ok(int_number as u16)
+    Ok(value as u16)
 }
 
 enum RegisterOrU16 {
     Register(u4),
     U16(u16),
 }
-fn parse_register_or_u16<'a>(
-    token: &mut Peekable<impl Iterator<Item = &'a str> + Clone>,
+fn parse_register_or_u16<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>> + Clone>,
 ) -> Result<RegisterOrU16, String> {
     let mut attempt = token.clone();
     if let Ok(reg) = parse_register(token) {
@@ -445,11 +481,11 @@ fn parse_register_or_u16<'a>(
     ))
 }
 
-fn expect_no_more_tokens<'a>(
-    token: &mut Peekable<impl Iterator<Item = &'a str>>,
+fn expect_no_more_tokens<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>>>,
 ) -> Result<(), String> {
     if let Some(remaining) = token.next() {
-        return Err(format!("Unexpected extra token '{remaining}'"));
+        return Err(format!("Unexpected extra token '{}'", remaining.original));
     }
     Ok(())
 }
@@ -459,9 +495,9 @@ enum RegisterOrLabel<'a> {
     Label(&'a str),
 }
 
-fn parse_register_or_label<'a>(
-    token: &mut Peekable<impl Iterator<Item = &'a str> + Clone>,
-) -> Result<RegisterOrLabel<'a>, String> {
+fn parse_register_or_label<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>> + Clone>,
+) -> Result<RegisterOrLabel<'l>, String> {
     let mut attempt = token.clone();
     if let Ok(reg) = parse_register(&mut attempt) {
         *token = attempt;
@@ -480,18 +516,25 @@ fn parse_register_or_label<'a>(
     ))
 }
 
-fn parse_label<'a>(
-    token: &mut Peekable<impl Iterator<Item = &'a str> + Clone>,
-) -> Result<&'a str, String> {
-    let Some(label) = token.next() else {
-        return Err(format!("Expected a label but got nothing"));
+fn parse_label<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>>>,
+) -> Result<&'l str, String> {
+    let label = match token.next() {
+        Some(Token {
+            value: TokenValue::Text(label),
+            ..
+        }) => label,
+        Some(Token { original, .. }) => {
+            return Err(format!("Expected a label but got '{original}' instead"));
+        }
+        None => return Err(format!("Expected a label but reached end of input")),
     };
     Ok(label)
 }
 
-fn parse_label_terminating<'a>(
-    token: &mut Peekable<impl Iterator<Item = &'a str> + Clone>,
-) -> Result<&'a str, String> {
+fn parse_label_terminating<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>>>,
+) -> Result<&'l str, String> {
     let label = parse_label(token)?;
     expect_no_more_tokens(token)?;
     Ok(label)
@@ -530,66 +573,75 @@ impl AddressMode {
     }
 }
 
-fn parse_register_and_address<'a>(
-    token: &mut Peekable<impl Iterator<Item = &'a str>>,
+fn parse_register_and_address<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>>>,
 ) -> Result<(u4, AddressMode), String> {
     let dst = parse_register(token)?;
-    parse_tag(token, ",")?;
+    parse_symbol(token, ",")?;
     let addr = parse_address(token)?;
     expect_no_more_tokens(token)?;
     Ok((dst, addr))
 }
 
-fn parse_address_and_register<'a>(
-    token: &mut Peekable<impl Iterator<Item = &'a str>>,
+fn parse_address_and_register<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>>>,
 ) -> Result<(AddressMode, u4), String> {
     let addr = parse_address(token)?;
-    parse_tag(token, ",")?;
+    parse_symbol(token, ",")?;
     let src = parse_register(token)?;
     expect_no_more_tokens(token)?;
     Ok((addr, src))
 }
 
-fn parse_address<'a>(
-    token: &mut Peekable<impl Iterator<Item = &'a str>>,
+fn parse_address<'i, 'l: 'i>(
+    token: &mut Peekable<impl Iterator<Item = &'i Token<'l>>>,
 ) -> Result<AddressMode, String> {
-    parse_tag(token, "[")?;
+    parse_symbol(token, "[")?;
 
-    let Some(next) = token.peek() else {
-        return Err("Expected an addressing mode but got nothing".to_owned());
+    match token.peek() {
+        Some(Token {
+            value: TokenValue::Symbol("--"),
+            ..
+        }) => {
+            parse_symbol(token, "--")?;
+            let reg = parse_register(token)?;
+            parse_symbol(token, "]")?;
+            return Ok(AddressMode::PreDecrement { r: reg });
+        }
+        _ => (),
     };
 
-    if *next == "-" {
-        parse_tag(token, "-")?;
-        parse_tag(token, "-")?;
-        let reg = parse_register(token)?;
-        parse_tag(token, "]")?;
-        return Ok(AddressMode::PreDecrement { r: reg });
-    }
     let reg = parse_register(token)?;
-    let Some(next) = token.peek() else {
-        return Err("Expected an addressing mode but got nothing".to_owned());
+
+    match token.peek() {
+        Some(Token {
+            value: TokenValue::Symbol("++"),
+            ..
+        }) => {
+            parse_symbol(token, "++")?;
+            parse_symbol(token, "]")?;
+            return Ok(AddressMode::PostIncrement { r: reg });
+        }
+        Some(Token {
+            value: TokenValue::Symbol("+"),
+            ..
+        }) => {
+            parse_symbol(token, "+")?;
+            let offset = parse_u16(token)?;
+            parse_symbol(token, "]")?;
+            return Ok(AddressMode::Offset { r: reg, offset });
+        }
+        Some(Token {
+            value: TokenValue::Symbol("-"),
+            ..
+        }) => {
+            parse_symbol(token, "-")?;
+            let offset = parse_u16(token)?.wrapping_neg();
+            parse_symbol(token, "]")?;
+            return Ok(AddressMode::Offset { r: reg, offset });
+        }
+        _ => (),
     };
-    if *next == "]" {
-        parse_tag(token, "]")?;
-        return Ok(AddressMode::Indirect { r: reg });
-    }
-    if *next != "+" {
-        return Err("Expected either a post increment or a offset addition".to_owned());
-    }
-    parse_tag(token, "+")?;
-
-    let Some(next) = token.peek() else {
-        return Err("Expected either a post increment or a offset addition".to_owned());
-    };
-
-    if *next == "+" {
-        parse_tag(token, "]")?;
-        return Ok(AddressMode::PostIncrement { r: reg });
-    }
-
-    let offset = parse_u16(token)?;
-    parse_tag(token, "]")?;
-
-    Ok(AddressMode::Offset { r: reg, offset })
+    parse_symbol(token, "]")?;
+    Ok(AddressMode::Indirect { r: reg })
 }

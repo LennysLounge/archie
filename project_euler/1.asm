@@ -11,7 +11,7 @@ skip_3:
     DEC R3
     JNE skip_5
     MOV R4, R1
-    LDI R3, 5
+    LDI R3, 05
 skip_5:
     ADD R5, R4
     ADDC R6, R0
@@ -19,7 +19,7 @@ skip_5:
     INCB R1,
     CMP R1, R7
     JL loop
-    
+
     ; // let program = vec![
     ; //     // setup variables
     ; //     LDI_POS(R1, u4::new(1)),
