@@ -31,43 +31,24 @@ fn main() -> io::Result<()> {
     let mut labels: HashMap<&str, usize> = HashMap::new();
     let mut deferred_labels: HashMap<usize, &str> = HashMap::new();
 
-    for (line_number, line) in content.lines().enumerate() {
+    for (idx, line) in content.lines().enumerate() {
+        let line_number = idx + 1;
         let mut token_list = match tokenize(line) {
             Ok(l) => l,
             Err(msg) => {
-                println!("ERROR lien {line_number}: {msg}");
+                println!("ERROR line {line_number}: {msg}");
                 println!("-> {line}");
                 return Ok(());
             }
         };
-
         let mut token = token_list.iter().peekable();
 
-        parse_line(&mut token, &mut output, &mut labels, &mut deferred_labels);
-
-        // let Some(op) = token.next() else {
-        //     continue;
-        // };
-
-        // let is_label = token.peek().is_some_and(|t| *t == ":");
-        // if is_label {
-        //     token.next();
-        //     if let Err(msg) = expect_no_more_tokens(&mut token) {
-        //         println!("ERROR line {line_number}: {msg}");
-        //         println!("-> {line}");
-        //         return Ok(());
-        //     }
-        //     labels.insert(op, output.len());
-        // } else {
-        //     match parse_instruction(op, &mut token, &mut output, &labels, &mut deferred_labels) {
-        //         Err(msg) => {
-        //             println!("ERROR line {line_number}: {msg}");
-        //             println!("-> {line}");
-        //             return Ok(());
-        //         }
-        //         Ok(_) => (),
-        //     }
-        // }
+        let result = parse_line(&mut token, &mut output, &mut labels, &mut deferred_labels);
+        if let Err(msg) = result {
+            println!("ERROR line {line_number}: {msg}");
+            println!("-> {line}");
+            return Ok(());
+        }
     }
     for (pos, label) in deferred_labels.iter() {
         if let Some(addr) = labels.get(label) {
@@ -237,7 +218,7 @@ fn parse_line<'i, 'l: 'i>(
                     output.push((*addr * 2) as u16);
                 }
             } else {
-                output.push(inverse + 0x0001);
+                output.push(inverse + 0x0002);
                 output.push(0x5000);
                 output.push(0u16);
                 deferred_labels.insert(output.len() - 1, label);

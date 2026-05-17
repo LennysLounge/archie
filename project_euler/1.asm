@@ -6,17 +6,17 @@ loop:
     DECB R2
     JNE skip_3
     MOV R4, R1
-    LDI R2 3
+    LDI R2, 3
 skip_3:
-    DEC R3
+    DECB R3
     JNE skip_5
     MOV R4, R1
     LDI R3, 05
 skip_5:
     ADD R5, R4
     ADDC R6, R0
-    MOV R4, R0,
-    INCB R1,
+    MOV R4, R0
+    INCB R1
     CMP R1, R7
     JL loop
 

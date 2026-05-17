@@ -32,6 +32,7 @@ pub struct MCU {
     rom: Vec<u16>,
     cycle_counter: u32,
     in_flight_op: Option<InFlightOp>,
+    last_inst: Option<u16>,
 }
 impl MCU {
     pub fn new(program: Vec<u16>) -> Self {
@@ -41,6 +42,7 @@ impl MCU {
             rom: program,
             cycle_counter: 0,
             in_flight_op: None,
+            last_inst: None,
         }
     }
 
@@ -481,6 +483,7 @@ impl MCU {
                     }
                     _ => panic!("instruction {inst:#06x} not implemented"),
                 }
+                self.last_inst = Some(inst);
             }
             Some(InFlightOp::LDI_IMM { dst }) => {
                 let Some(imm16) = self.read_rom_and_advance_pc() else {
@@ -670,14 +673,24 @@ impl MCU {
 
         queue!(
             stdout,
-            MoveTo(35, 8),
+            MoveTo(35, 6),
             Print("Address Registers:"),
-            MoveTo(37, 9),
+            MoveTo(37, 7),
             Print(format!("[SP] = {:#06x}", self.register[14])),
-            MoveTo(37, 10),
+            MoveTo(37, 8),
             Print(format!("[PC] = {:#06x}", self.register[15])),
-            MoveTo(35, 12),
+            MoveTo(35, 10),
             Print(format!("Cycles: {}", self.cycle_counter)),
+            MoveTo(35, 11),
+            Print(match self.last_inst {
+                Some(inst) => format!("Last instruction: {:#06x}", inst),
+                None => format!("Last instruction: ------"),
+            }),
+            MoveTo(35, 12),
+            Print(match self.rom.get(self.register[15] as usize / 2) {
+                Some(inst) => format!("Next instruction: {:#06x}", inst),
+                None => format!("Next instruction: ------"),
+            }),
         )?;
 
         queue!(stdout, MoveTo(0, 14), Print("RAM:"))?;

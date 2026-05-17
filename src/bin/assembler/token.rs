@@ -116,10 +116,16 @@ fn lex_number_with_any_base<'a>(
     start: usize,
     chars: &mut Peekable<impl Iterator<Item = (usize, char)>>,
 ) -> Result<Token<'a>, String> {
-    match chars.next() {
+    match chars.peek() {
         Some((_, '0'..='9')) => lex_number_base_10(line, start, chars),
-        Some((_, 'x')) => lex_number_base_16(line, start, chars),
-        Some((_, 'b')) => lex_number_base_2(line, start, chars),
+        Some((_, 'x')) => {
+            chars.next();
+            lex_number_base_16(line, start, chars)
+        }
+        Some((_, 'b')) => {
+            chars.next();
+            lex_number_base_2(line, start, chars)
+        }
         Some((_, c)) => Err(format!("Invalid character '{c}' in number literal")),
         None => Ok(Token {
             value: TokenValue::Number(0),
