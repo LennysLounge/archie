@@ -37,7 +37,7 @@ pub struct MCU {
 impl MCU {
     pub fn new(program: Vec<u16>) -> Self {
         Self {
-            register: Default::default(),
+            register: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xF000, 0],
             ram: [0; u16::MAX as usize + 1],
             rom: program,
             cycle_counter: 0,
@@ -162,7 +162,7 @@ impl MCU {
                                 addr = addr.wrapping_sub(if byte_mode { 1 } else { 2 });
                                 self.register[ra] = addr;
                             }
-                            self.write_bytes_to_ram(addr, value, byte_mode);
+                            self.write_ram(addr, value, byte_mode);
                             if address_mode == 1 {
                                 addr = addr.wrapping_add(if byte_mode { 1 } else { 2 });
                                 self.register[ra] = addr;
@@ -540,7 +540,7 @@ impl MCU {
                     self.set_halted();
                     return;
                 };
-                self.write_bytes_to_ram(base_addr.wrapping_add(offset), value, byte_mode);
+                self.write_ram(base_addr.wrapping_add(offset), value, byte_mode);
                 self.in_flight_op = None;
             }
         }
@@ -548,22 +548,35 @@ impl MCU {
     }
 
     fn load_from_ram(&self, addr: u16, byte_mode: bool, signed: bool) -> u16 {
+        let raw = self.read_ram_byte(addr);
         if byte_mode {
-            let raw = self.ram[addr as usize];
             if signed { raw as i8 as u16 } else { raw as u16 }
         } else {
-            let floored_addr = (addr & 0xFFFE) as usize;
-            u16::from_le_bytes(self.ram[floored_addr..floored_addr + 2].try_into().unwrap())
+            raw as u16 | (self.read_ram_byte(addr.wrapping_add(1)) as u16) << 8
         }
     }
 
-    fn write_bytes_to_ram(&mut self, addr: u16, value: u16, byte_mode: bool) {
+    fn read_ram_byte(&self, addr: u16) -> u8 {
+        match addr {
+            0xF000..=0xFFFF => 0,
+            _ => self.ram[addr as usize],
+        }
+    }
+
+    fn write_ram(&mut self, addr: u16, value: u16, byte_mode: bool) {
         let bytes = value.to_le_bytes();
         if byte_mode {
-            self.ram[addr as usize] = bytes[0];
+            self.write_ram_byte(addr, bytes[0]);
         } else {
-            self.ram[(addr & 0xFFFE) as usize] = bytes[0];
-            self.ram[((addr & 0xFFFE) + 1) as usize] = bytes[1];
+            self.write_ram_byte(addr, bytes[0]);
+            self.write_ram_byte(addr.wrapping_add(1), bytes[1]);
+        }
+    }
+
+    fn write_ram_byte(&mut self, addr: u16, value: u8) {
+        match addr {
+            0xF000..=0xFFFF => (),
+            _ => self.ram[addr as usize] = value,
         }
     }
 
