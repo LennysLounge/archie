@@ -27,12 +27,12 @@ enum InFlightOp {
     },
 }
 pub struct MCU {
-    register: [u16; 16],
-    ram: [u8; u16::MAX as usize + 1],
-    rom: Vec<u16>,
-    cycle_counter: u32,
+    pub register: [u16; 16],
+    pub ram: [u8; u16::MAX as usize + 1],
+    pub rom: Vec<u16>,
+    pub cycle_counter: u32,
     in_flight_op: Option<InFlightOp>,
-    last_inst: Option<u16>,
+    pub last_inst: Option<u16>,
 }
 impl MCU {
     pub fn new(program: Vec<u16>) -> Self {
@@ -648,6 +648,9 @@ impl MCU {
 
     pub fn is_overflow_flag_set(&self) -> bool {
         self.register[13] & 0x0008 != 0
+    }
+    pub fn is_interrupt_request_enabled_flag_set(&self) -> bool {
+        self.register[13] & 0x0010 != 0
     }
 
     pub fn print_status(&self, stdout: &mut Stdout) -> io::Result<()> {

@@ -5,7 +5,11 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
+color-eyre = "0.6.5"
 crossterm = "0.29.0"
+ratatui = "0.30.0"
+tracing = "0.1.44"
+tui-logger = { version = "0.18.2", features = ["tracing-support"] }
 ux = "0.1.6"
 
 [[bin]]
