@@ -97,6 +97,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "tracing",
+ "tracing-subscriber",
  "tui-logger",
  "ux",
 ]

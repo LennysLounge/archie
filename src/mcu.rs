@@ -1,6 +1,7 @@
 use std::io::{self, Stdout};
 
 use crossterm::{cursor::MoveTo, queue, style::Print};
+use tracing::info;
 
 #[allow(non_camel_case_types)]
 enum InFlightOp {
@@ -53,6 +54,7 @@ impl MCU {
     }
 
     pub fn run_one_cycle(&mut self) {
+        info!("Run once");
         if self.is_halted() {
             return;
         }

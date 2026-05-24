@@ -1,34 +1,23 @@
-#![allow(unused)]
-
 use std::{
     fs,
-    io::{self, Stdout, Write},
-    panic,
+    io::{self},
     path::{Path, PathBuf},
-    thread::{self, sleep},
+    thread::sleep,
     time::{Duration, Instant},
 };
 
-use archie::{
-    isa::{self, Address::*, Instruction::*, Register::*},
-    mcu::MCU,
-};
+use archie::mcu::MCU;
 use clap::Parser;
-use crossterm::{
-    ExecutableCommand, QueueableCommand,
-    cursor::{DisableBlinking, Hide, MoveTo},
-    event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, poll, read},
-    execute, queue,
-    style::Print,
-    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode},
-};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, poll, read};
 use ratatui::{
     DefaultTerminal, Frame,
     prelude::*,
-    symbols::border,
-    widgets::{Block, BorderType, Borders, Padding, Paragraph, Row, Table, TableState, Widget},
+    style::Styled,
+    widgets::{Block, BorderType, Borders, Padding, Paragraph, Row, Table, Widget},
 };
-use ux::u4;
+use tracing::{error, info, warn};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tui_logger::{TuiLoggerSmartWidget, TuiWidgetEvent, TuiWidgetState};
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -39,12 +28,21 @@ struct Cli {
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
+    tui_logger::init_logger(tui_logger::LevelFilter::Trace)?;
+    tui_logger::set_default_level(tui_logger::LevelFilter::Trace);
+
+    tracing_subscriber::registry()
+        .with(tui_logger::TuiTracingSubscriberLayer)
+        .init();
+
     let cli = Cli::parse();
     let program = read_file_as_u16(&cli.input_file)?;
     let mut app = App {
         mcu: MCU::new(program),
         frames: 0,
         exit: false,
+        logger_state: TuiWidgetState::default(),
+        current_screen: Screen::McuState,
     };
     app.mcu.set_dbg_flag();
 
@@ -52,15 +50,37 @@ fn main() -> color_eyre::Result<()> {
     Ok(())
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+enum Screen {
+    McuState,
+    Logging,
+    Terminal,
+}
+impl Screen {
+    const SCREENS: [Screen; 3] = [Screen::McuState, Screen::Logging, Screen::Terminal];
+    fn name(&self) -> &str {
+        match self {
+            Screen::McuState => "MCU State",
+            Screen::Logging => "Logging",
+            Screen::Terminal => "Serial Terminal",
+        }
+    }
+}
+
 struct App {
     mcu: MCU,
     frames: i32,
     exit: bool,
+    logger_state: TuiWidgetState,
+    current_screen: Screen,
 }
 
 impl App {
     fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let mut last_update = Instant::now();
+        info!("hello world, starting main loop now");
+        warn!("Warning!!");
+        error!("!error!");
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
             self.handle_events()?;
@@ -78,6 +98,7 @@ impl App {
                 }
                 let now = Instant::now();
                 if now.duration_since(last_update).as_millis() > 16 {
+                    last_update = now;
                     break;
                 }
             }
@@ -105,18 +126,53 @@ impl App {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Char('q') => self.exit = true,
-            KeyCode::Char('o') => {
-                if self.mcu.is_dbg_flag_set() {
-                    self.mcu.run_one_cycle();
+            KeyCode::Char(c @ '0'..='9') => {
+                let num = c.to_digit(10).unwrap_or(0);
+                let index = match num {
+                    0 => 10,
+                    _ => num - 1,
+                };
+                self.current_screen = *Screen::SCREENS
+                    .get(index as usize)
+                    .unwrap_or(&Screen::McuState);
+            }
+            _ => match self.current_screen {
+                Screen::McuState => match key_event.code {
+                    KeyCode::Char('o') => {
+                        if self.mcu.is_dbg_flag_set() {
+                            self.mcu.run_one_cycle();
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        self.mcu.unset_dbg_flag();
+                    }
+                    KeyCode::Char('b') => {
+                        self.mcu.set_dbg_flag();
+                    }
+                    _ => (),
+                },
+                Screen::Logging => {
+                    let evt = match key_event.code {
+                        KeyCode::Char('h') => Some(TuiWidgetEvent::HideKey),
+                        KeyCode::Char('f') => Some(TuiWidgetEvent::FocusKey),
+                        KeyCode::Up => Some(TuiWidgetEvent::UpKey),
+                        KeyCode::Down => Some(TuiWidgetEvent::DownKey),
+                        KeyCode::Left => Some(TuiWidgetEvent::LeftKey),
+                        KeyCode::Right => Some(TuiWidgetEvent::RightKey),
+                        KeyCode::Char('-') => Some(TuiWidgetEvent::MinusKey),
+                        KeyCode::Char('+') => Some(TuiWidgetEvent::PlusKey),
+                        KeyCode::PageUp => Some(TuiWidgetEvent::PrevPageKey),
+                        KeyCode::PageDown => Some(TuiWidgetEvent::NextPageKey),
+                        KeyCode::Esc => Some(TuiWidgetEvent::EscapeKey),
+                        KeyCode::Char(' ') => Some(TuiWidgetEvent::SpaceKey),
+                        _ => None,
+                    };
+                    if let Some(e) = evt {
+                        self.logger_state.transition(e);
+                    }
                 }
-            }
-            KeyCode::Char('r') => {
-                self.mcu.unset_dbg_flag();
-            }
-            KeyCode::Char('b') => {
-                self.mcu.set_dbg_flag();
-            }
-            _ => (),
+                Screen::Terminal => todo!(),
+            },
         }
     }
 
@@ -347,174 +403,92 @@ impl App {
             buf,
         );
     }
-    fn render_(&self, area: Rect, buf: &mut Buffer) {}
 }
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let v_layout = Layout::vertical([
-            Constraint::Length(15),
-            Constraint::Fill(1),
-            Constraint::Length(2),
-        ])
-        .split(area);
+        let layout = Layout::vertical([Constraint::Fill(1), Constraint::Length(2)]).split(area);
 
-        let h_layout = Layout::horizontal(vec![Constraint::Min(51), Constraint::Length(23)])
-            .split(v_layout[0]);
+        match self.current_screen {
+            Screen::McuState => {
+                let v_layout = Layout::vertical([Constraint::Length(15), Constraint::Fill(1)])
+                    .split(layout[0]);
 
-        self.render_registers(h_layout[0], buf);
-        self.render_cpu_status(h_layout[1], buf);
+                let h_layout =
+                    Layout::horizontal(vec![Constraint::Min(51), Constraint::Length(23)])
+                        .split(v_layout[0]);
 
-        let h_layout =
-            Layout::horizontal(vec![Constraint::Fill(1), Constraint::Fill(1)]).split(v_layout[1]);
+                self.render_registers(h_layout[0], buf);
+                self.render_cpu_status(h_layout[1], buf);
 
-        self.render_disassembly(h_layout[0], buf);
+                let h_layout = Layout::horizontal(vec![Constraint::Fill(1), Constraint::Fill(1)])
+                    .split(v_layout[1]);
+
+                self.render_disassembly(h_layout[0], buf);
+            }
+            Screen::Logging => {
+                TuiLoggerSmartWidget::default()
+                    .state(&self.logger_state)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().dark_gray())
+                    .style_error(Style::default().red())
+                    .style_warn(Style::default().yellow())
+                    .render(layout[0], buf);
+            }
+            Screen::Terminal => (),
+        }
 
         let block = Block::bordered()
             .borders(Borders::TOP)
             .border_style(Style::default().dark_gray());
-        let inner = block.inner(v_layout[2]);
-        block.render(v_layout[2], buf);
+        let controls_row_area = block.inner(layout[1]);
+        block.render(layout[1], buf);
 
-        let mut controls = vec![Line::from("Quit: <Q>")];
-        if self.mcu.is_dbg_flag_set() {
-            controls.push(Line::from("Single Step: <O>"));
-            controls.push(Line::from("Run: <R>"));
-        } else {
-            Line::from("Stop: <B>");
+        let mut controls = Vec::new();
+
+        controls.push(
+            Line::from(
+                Screen::SCREENS
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        format!("[{}]", i + 1).set_style(if &self.current_screen == s {
+                            Style::default().white().bold()
+                        } else {
+                            Style::default().dark_gray()
+                        })
+                    })
+                    .chain([" ".into(), self.current_screen.name().into()])
+                    .collect::<Vec<_>>(),
+            )
+            .centered(),
+        );
+        match self.current_screen {
+            Screen::McuState => {
+                if self.mcu.is_dbg_flag_set() {
+                    controls.push(Line::from("Single Step: <O>").centered());
+                    controls.push(Line::from("Run: <R>").centered());
+                } else {
+                    controls.push(Line::from("Stop: <B>").centered());
+                }
+            }
+            Screen::Logging => {
+                controls.push(Line::from("Hide: <H>").centered());
+            }
+            Screen::Terminal => (),
         }
+        controls.push(Line::from("Quit: <Q>").centered());
 
-        let controls_layout =
-            Layout::horizontal(controls.iter().map(|l| Constraint::Min(l.width() as u16)))
-                .split(inner);
+        let controls_layout = Layout::horizontal(
+            controls
+                .iter()
+                .map(|l| Constraint::Length(l.width() as u16)),
+        )
+        .flex(layout::Flex::SpaceBetween)
+        .split(controls_row_area);
         for (control, area) in controls.iter().zip(controls_layout.iter()) {
             control.render(*area, buf);
         }
     }
-}
-
-fn app(terminal: &mut DefaultTerminal) -> io::Result<()> {
-    loop {
-        terminal.draw(|frame| {
-            frame.render_widget("hello World", frame.area());
-        });
-        if read()?.is_key_press() {
-            break;
-        }
-    }
-
-    Ok(())
-}
-
-//     let cli = Cli::parse();
-
-//     let program = read_file_as_u16(&cli.input_file)?;
-
-//     enable_raw_mode()?;
-//     get_next_key()?;
-
-//     let mut stdout = io::stdout();
-//     execute!(stdout, EnterAlternateScreen, DisableBlinking, Hide)?;
-
-//     // Restore terminal on panic
-//     let default_hook = panic::take_hook();
-//     panic::set_hook(Box::new(move |info| {
-//         let mut stdout = io::stdout();
-//         stdout.execute(LeaveAlternateScreen).unwrap();
-//         default_hook(info);
-//     }));
-
-//     let mut mcu = MCU::new(program);
-//     mcu.set_dbg_flag();
-
-//     let mut running = true;
-//     while running {
-//         //queue!(stdout, Clear(ClearType::All))?;
-//         mcu.print_status(&mut stdout);
-
-//         let (width, height) = crossterm::terminal::size()?;
-//         queue!(stdout, MoveTo(0, height - 1), Print("Quit: Q    "),)?;
-//         if mcu.is_dbg_flag_set() {
-//             queue!(stdout, Print("Single step: O    Run: R    "))?;
-//         } else {
-//             queue!(stdout, Print("Break: B    "))?;
-//         }
-//         queue!(stdout, MoveTo(0, 14))?;
-
-//         stdout.flush();
-//         let key = get_next_key()?;
-//         if let Some(key) = key {
-//             match key {
-//                 KeyEvent {
-//                     code: KeyCode::Char('q'),
-//                     ..
-//                 }
-//                 | KeyEvent {
-//                     code: KeyCode::Char('c'),
-//                     modifiers: KeyModifiers::CONTROL,
-//                     ..
-//                 } => {
-//                     running = false;
-//                 }
-//                 KeyEvent {
-//                     code: KeyCode::Char('o'),
-//                     kind: crossterm::event::KeyEventKind::Press,
-//                     ..
-//                 } => {
-//                     if mcu.is_dbg_flag_set() {
-//                         mcu.run_one_cycle();
-//                     }
-//                 }
-//                 KeyEvent {
-//                     code: KeyCode::Char('r'),
-//                     kind: crossterm::event::KeyEventKind::Press,
-//                     ..
-//                 } => {
-//                     mcu.unset_dbg_flag();
-//                 }
-//                 KeyEvent {
-//                     code: KeyCode::Char('b'),
-//                     kind: crossterm::event::KeyEventKind::Press,
-//                     ..
-//                 } => {
-//                     mcu.set_dbg_flag();
-//                 }
-//                 _ => (),
-//             }
-//         }
-//         if !mcu.is_dbg_flag_set() && !mcu.is_halted() {
-//             let start = Instant::now();
-//             loop {
-//                 for _ in 0..1000 {
-//                     mcu.run_one_cycle();
-//                     if mcu.is_dbg_flag_set() {
-//                         break;
-//                     }
-//                 }
-//                 let now = Instant::now();
-//                 if now.duration_since(start) > Duration::from_millis(10)
-//                     || mcu.is_dbg_flag_set()
-//                     || mcu.is_halted()
-//                 {
-//                     break;
-//                 }
-//             }
-//         } else {
-//             thread::sleep(Duration::from_millis(10));
-//         }
-//     }
-//     let (width, height) = crossterm::terminal::size()?;
-//     execute!(stdout, LeaveAlternateScreen)?;
-//     Ok(())
-// }
-
-fn get_next_key() -> io::Result<Option<KeyEvent>> {
-    while poll(Duration::from_millis(10))? {
-        match read()? {
-            Event::Key(event) => return Ok(Some(event)),
-            _ => (),
-        }
-    }
-    Ok(None)
 }
 
 fn read_file_as_u16(path: &impl AsRef<Path>) -> io::Result<Vec<u16>> {
