@@ -130,7 +130,7 @@ fn parse_line<'i, 'l: 'i>(
                 _ => unreachable!(),
             };
             let (dst, addr) = parse_register_and_address(token)?;
-            output.push(base_op + (u16::from(dst) << 4) + addr.reg());
+            output.push(base_op + addr.mode() + (u16::from(dst) << 4) + addr.reg());
             if let Some(offset) = addr.offset() {
                 output.push(offset);
             }
@@ -142,7 +142,7 @@ fn parse_line<'i, 'l: 'i>(
                 _ => unreachable!(),
             };
             let (addr, src) = parse_address_and_register(token)?;
-            output.push(base_op + (addr.reg() << 4) + u16::from(src));
+            output.push(base_op + addr.mode() + (addr.reg() << 4) + u16::from(src));
             if let Some(offset) = addr.offset() {
                 output.push(offset);
             }
@@ -521,6 +521,7 @@ fn parse_label_terminating<'i, 'l: 'i>(
     Ok(label)
 }
 
+#[derive(Debug)]
 enum AddressMode {
     Indirect { r: u4 },
     PostIncrement { r: u4 },

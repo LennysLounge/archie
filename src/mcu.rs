@@ -34,6 +34,7 @@ pub struct MCU {
     pub cycle_counter: u32,
     in_flight_op: Option<InFlightOp>,
     pub last_inst: Option<u16>,
+    pub serial_out: Vec<u8>,
 }
 impl MCU {
     pub fn new(program: Vec<u16>) -> Self {
@@ -44,6 +45,7 @@ impl MCU {
             cycle_counter: 0,
             in_flight_op: None,
             last_inst: None,
+            serial_out: Vec::new(),
         }
     }
 
@@ -577,6 +579,7 @@ impl MCU {
 
     fn write_ram_byte(&mut self, addr: u16, value: u8) {
         match addr {
+            0xFFFF => self.serial_out.push(value),
             0xF000..=0xFFFF => (),
             _ => self.ram[addr as usize] = value,
         }

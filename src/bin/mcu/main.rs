@@ -18,6 +18,7 @@ use ratatui::{
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tui_logger::{TuiLoggerSmartWidget, TuiWidgetEvent, TuiWidgetState};
+use tui_term::{vt100, widget::PseudoTerminal};
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -43,6 +44,7 @@ fn main() -> color_eyre::Result<()> {
         exit: false,
         logger_state: TuiWidgetState::default(),
         current_screen: Screen::McuState,
+        terminal: vt100::Parser::new(24, 80, 30),
     };
     app.mcu.set_dbg_flag();
 
@@ -73,6 +75,7 @@ struct App {
     exit: bool,
     logger_state: TuiWidgetState,
     current_screen: Screen,
+    terminal: vt100::Parser,
 }
 
 impl App {
@@ -81,6 +84,20 @@ impl App {
         info!("hello world, starting main loop now");
         warn!("Warning!!");
         error!("!error!");
+
+        self.terminal.process(
+            "AAAAAAAABBBBBBBBCCCCCCCCDDDDDDDDEEEEEEEEFFFFFFFFGGGGGGGGHHHHHHHHIIIIIIIIJJJJJJJJK"
+                .as_bytes(),
+        );
+        self.terminal.process("\x1b[1;31m".as_bytes());
+        for i in 0..5 {
+            self.terminal
+                .process(&format!("{i} Hello World\n\r").as_bytes());
+        }
+
+        self.terminal.screen_mut().set_scrollback(30);
+        info!("scrollback: {}", self.terminal.screen().scrollback());
+
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
             self.handle_events()?;
@@ -101,6 +118,10 @@ impl App {
                     last_update = now;
                     break;
                 }
+            }
+            if !self.mcu.serial_out.is_empty() {
+                self.terminal.process(&self.mcu.serial_out);
+                self.mcu.serial_out.clear();
             }
             self.frames += 1;
         }
@@ -171,7 +192,7 @@ impl App {
                         self.logger_state.transition(e);
                     }
                 }
-                Screen::Terminal => todo!(),
+                Screen::Terminal => (),
             },
         }
     }
@@ -434,7 +455,22 @@ impl Widget for &App {
                     .style_warn(Style::default().yellow())
                     .render(layout[0], buf);
             }
-            Screen::Terminal => (),
+            Screen::Terminal => {
+                let (rows, cols) = self.terminal.screen().size();
+                PseudoTerminal::new(self.terminal.screen())
+                    .block(
+                        Block::bordered()
+                            .border_type(BorderType::Rounded)
+                            .padding(Padding::new(2, 2, 0, 0))
+                            .title("Terminal".white().bold())
+                            .border_style(Style::default().dark_gray()),
+                    )
+                    .render(
+                        layout[0]
+                            .centered(Constraint::Length(cols + 6), Constraint::Length(rows + 2)),
+                        buf,
+                    );
+            }
         }
 
         let block = Block::bordered()
