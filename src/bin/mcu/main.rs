@@ -393,7 +393,7 @@ impl App {
         let min = (self.mcu.register[15]).saturating_sub(layout[1].height & !1);
         let widths = vec![
             Constraint::Length(4),
-            Constraint::Min(6),
+            Constraint::Length(6),
             Constraint::Min(6),
         ];
         let rows = (0..=layout[1].height)
