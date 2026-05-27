@@ -29,7 +29,7 @@ fn main() -> io::Result<()> {
 
     let mut output: Vec<u16> = Vec::new();
     let mut labels: HashMap<&str, usize> = HashMap::new();
-    let mut deferred_labels: HashMap<usize, &str> = HashMap::new();
+    let mut deferred_labels: HashMap<usize, DeferredLabel> = HashMap::new();
 
     for (idx, line) in content.lines().enumerate() {
         let line_number = idx + 1;
@@ -51,14 +51,36 @@ fn main() -> io::Result<()> {
         }
     }
     for (pos, label) in deferred_labels.iter() {
-        if let Some(addr) = labels.get(label) {
-            let imm16 = output
-                .get_mut(*pos)
-                .expect("The position that needs to be filled by the address must exist");
-            *imm16 = (*addr * 2) as u16;
-        } else {
-            println!("ERROR: Unknown label '{label}'");
+        let Some(addr) = labels.get(label.label) else {
+            println!("ERROR: Unknown label '{}'", label.label);
             return Ok(());
+        };
+        match label.jump_type {
+            JumpType::Absolute => {
+                let imm16 = output
+                    .get_mut(*pos)
+                    .expect("The position that needs to be filled by the address must exist");
+                *imm16 = (*addr * 2) as u16;
+            }
+            JumpType::Offset => {
+                let offset = *addr as isize - *pos as isize - 1;
+                if offset < -128 {
+                    println!(
+                        "Jump address is more than 128 words behind. Distance to label is {offset}"
+                    );
+                    return Ok(());
+                }
+                if offset > 127 {
+                    println!(
+                        "Jump address is more than 127 words in front. Distance to label is {offset}"
+                    );
+                    return Ok(());
+                }
+                let inst = output
+                    .get_mut(*pos)
+                    .expect("The position that needs to be filled by the address must exist");
+                *inst = *inst + (offset as u16 & 0x00FF);
+            }
         }
     }
 
@@ -73,11 +95,34 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+struct DeferredLabel<'a> {
+    label: &'a str,
+    jump_type: JumpType,
+}
+enum JumpType {
+    Absolute,
+    Offset,
+}
+impl<'a> DeferredLabel<'a> {
+    fn absolute(label: &'a str) -> Self {
+        Self {
+            label,
+            jump_type: JumpType::Absolute,
+        }
+    }
+    fn offset(label: &'a str) -> Self {
+        Self {
+            label,
+            jump_type: JumpType::Offset,
+        }
+    }
+}
+
 fn parse_line<'i, 'l: 'i>(
     token: &mut Peekable<impl Iterator<Item = &'i Token<'l>> + Clone>,
     output: &mut Vec<u16>,
     labels: &mut HashMap<&'l str, usize>,
-    deferred_labels: &mut HashMap<usize, &'l str>,
+    deferred_labels: &mut HashMap<usize, DeferredLabel<'l>>,
 ) -> Result<(), String> {
     let Some(t) = token.next() else {
         return Ok(());
@@ -188,40 +233,43 @@ fn parse_line<'i, 'l: 'i>(
                 } else {
                     output.push(0x5000);
                     output.push(0u16);
-                    deferred_labels.insert(output.len() - 1, label);
+                    deferred_labels.insert(output.len() - 1, DeferredLabel::absolute(label));
                 }
             }
         },
         "JE" | "JNE" | "JL" | "JLE" | "JG" | "JGE" | "JB" | "JBE" | "JA" | "JAE" => {
-            let (inst, inverse) = match token_text {
-                "JE" => (0x5300, 0x5400),
-                "JNE" => (0x5400, 0x5300),
-                "JL" => (0x5500, 0x5800),
-                "JLE" => (0x5600, 0x5700),
-                "JG" => (0x5700, 0x5600),
-                "JGE" => (0x5800, 0x5500),
-                "JB" => (0x5900, 0x5C00),
-                "JBE" => (0x5A00, 0x5B00),
-                "JA" => (0x5B00, 0x5A00),
-                "JAE" => (0x5C00, 0x5900),
+            let inst = match token_text {
+                "JE" => 0x5300,
+                "JNE" => 0x5400,
+                "JL" => 0x5500,
+                "JLE" => 0x5600,
+                "JG" => 0x5700,
+                "JGE" => 0x5800,
+                "JB" => 0x5900,
+                "JBE" => 0x5A00,
+                "JA" => 0x5B00,
+                "JAE" => 0x5C00,
                 _ => unreachable!(),
             };
             let label = parse_label_terminating(token)?;
             let target_addr = labels.get(label);
             if let Some(addr) = target_addr {
                 let offset = *addr as isize - output.len() as isize - 1;
-                if offset >= -128 {
-                    output.push(inst + (offset as u16 & 0x00FF));
-                } else {
-                    output.push(inverse + 0x0001);
-                    output.push(0x5000);
-                    output.push((*addr * 2) as u16);
+                if offset < -128 {
+                    return Err(format!(
+                        "Jump address is more than 128 words behind. Distance to label is {offset}"
+                    ));
                 }
+                if offset > 127 {
+                    // I dont think this is ever possible but better be safe.
+                    return Err(format!(
+                        "Jump address is more than 127 words in front. Distance to label is {offset}"
+                    ));
+                }
+                output.push(inst + (offset as u16 & 0x00FF));
             } else {
-                output.push(inverse + 0x0002);
-                output.push(0x5000);
-                output.push(0u16);
-                deferred_labels.insert(output.len() - 1, label);
+                output.push(inst);
+                deferred_labels.insert(output.len() - 1, DeferredLabel::offset(label));
             }
         }
         "ADD" => {
