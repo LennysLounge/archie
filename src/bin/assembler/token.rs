@@ -126,6 +126,7 @@ fn lex_number_with_any_base<'a>(
             chars.next();
             lex_number_base_2(line, start, chars)
         }
+        Some((_, c)) if c.is_whitespace() => lex_number_base_10(line, start, chars),
         Some((_, c)) => Err(format!("Invalid character '{c}' in number literal")),
         None => Ok(Token {
             value: TokenValue::Number(0),

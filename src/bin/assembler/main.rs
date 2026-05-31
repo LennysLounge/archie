@@ -145,13 +145,21 @@ fn parse_line<'i, 'l: 'i>(
 
     match token_text {
         "NOP" => output.push(0x0000),
-        "CALL" => match parse_register_or_u16(token)? {
-            RegisterOrU16::Register(reg) => {
+        "CALL" => match parse_register_or_label(token)? {
+            RegisterOrLabel::Register(reg) => {
                 output.push(0x0020 + u16::from(reg));
             }
-            RegisterOrU16::U16(value) => {
-                output.push(0x0010);
-                output.push(value);
+            RegisterOrLabel::Label(label) => {
+                let target_addr = labels.get(label);
+                if let Some(addr) = target_addr {
+                    let offset = *addr as isize - output.len() as isize - 1;
+                    output.push(0x0010);
+                    output.push((*addr * 2) as u16);
+                } else {
+                    output.push(0x0010);
+                    output.push(0u16);
+                    deferred_labels.insert(output.len() - 1, DeferredLabel::absolute(label));
+                }
             }
         },
         "RET" => output.push(0x0030),

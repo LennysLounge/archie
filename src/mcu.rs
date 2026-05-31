@@ -8,6 +8,7 @@ enum InFlightOp {
     LDI_IMM {
         dst: usize,
     },
+    CALL_IMM,
     JMP_IMM,
     LD_IMM {
         signed: bool,
@@ -73,6 +74,25 @@ impl MCU {
                 match inst {
                     // Noop
                     0x0000 => (),
+                    // CALL imm
+                    0x0010..=0x001F => self.in_flight_op = Some(InFlightOp::CALL_IMM),
+                    // CALL reg
+                    0x0020..=0x002F => {
+                        let a = if ra == 0 { 0 } else { self.register[ra] };
+                        self.register[14] = self.register[14].wrapping_sub(2);
+                        let bytes = self.register[15].to_le_bytes();
+                        self.ram[self.register[14] as usize] = bytes[0];
+                        self.ram[self.register[14] as usize + 1] = bytes[1];
+                        self.register[15] = a;
+                    }
+                    // RET
+                    0x0030..=0x003F => {
+                        let sp = self.register[14] as usize;
+                        let v = u16::from_le_bytes(self.ram[sp..sp + 2].try_into().unwrap());
+                        self.register[15] = v;
+                        self.set_flags_on_write(v);
+                        self.register[14] = self.register[14].wrapping_add(2);
+                    }
                     // DBG
                     0x00BB => {
                         self.set_dbg_flag();
@@ -396,7 +416,7 @@ impl MCU {
                         self.set_flags(
                             result == 0,
                             false,
-                            a << (16 - shift_amount) != 0,
+                            a.unbounded_shl((16 - shift_amount) as u32) != 0,
                             (a & 0x8000) != (result & 0x8000),
                         );
                     }
@@ -496,6 +516,18 @@ impl MCU {
                 };
                 self.register[dst] = imm16;
                 self.set_flags_on_write(imm16);
+                self.in_flight_op = None;
+            }
+            Some(InFlightOp::CALL_IMM) => {
+                let Some(addr) = self.read_rom_and_advance_pc() else {
+                    self.set_halted();
+                    return;
+                };
+                self.register[14] = self.register[14].wrapping_sub(2);
+                let bytes = self.register[15].to_le_bytes();
+                self.ram[self.register[14] as usize] = bytes[0];
+                self.ram[self.register[14] as usize + 1] = bytes[1];
+                self.register[15] = addr;
                 self.in_flight_op = None;
             }
             Some(InFlightOp::JMP_IMM) => {

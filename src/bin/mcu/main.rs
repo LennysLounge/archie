@@ -85,16 +85,6 @@ impl App {
         warn!("Warning!!");
         error!("!error!");
 
-        self.terminal.process(
-            "AAAAAAAABBBBBBBBCCCCCCCCDDDDDDDDEEEEEEEEFFFFFFFFGGGGGGGGHHHHHHHHIIIIIIIIJJJJJJJJK"
-                .as_bytes(),
-        );
-        self.terminal.process("\x1b[1;31m".as_bytes());
-        for i in 0..5 {
-            self.terminal
-                .process(&format!("{i} Hello World\n\r").as_bytes());
-        }
-
         self.terminal.screen_mut().set_scrollback(30);
         info!("scrollback: {}", self.terminal.screen().scrollback());
 
