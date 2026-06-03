@@ -352,7 +352,7 @@ impl App {
 
         Paragraph::new(vec![
             "Cycles:".into(),
-            Line::from(self.mcu.cycle_counter.to_string())
+            Line::from(self.mcu.cycles.to_string())
                 .right_aligned()
                 .light_cyan(),
         ])
