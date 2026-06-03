@@ -1,10 +1,15 @@
 use std::{
     io::{self, Stdout},
     sync::Arc,
+    thread::current,
 };
 
 use crossterm::{cursor::MoveTo, queue, style::Print};
 use tracing::warn;
+
+use crate::isa::{
+    self, AluOpcode, IfOpcode, InstructionFormat, MemoryOpcode, Misc, MiscOpcode, OffsetOpcode,
+};
 
 // #[allow(non_camel_case_types)]
 // enum InFlightOp {
@@ -81,6 +86,12 @@ pub const OPCODE_IFAE: u16 = 0xAC00;
 pub const OPCODE_JMP_OFF: u16 = 0xB000;
 pub const OPCODE_CALL_OFF: u16 = 0xB400;
 
+enum InstructionPhase {
+    Fetch,
+    FetchImmediateValue,
+    Execute(u8),
+}
+
 pub struct MCU {
     pub register: [u16; 16],
     pub ram: [u8; u16::MAX as usize + 1],
@@ -90,8 +101,10 @@ pub struct MCU {
     pub halted: bool,
     pub skip_flag: bool,
     pub carry: u16,
-    pub last_inst: u16,
-    pub instruction_phase: u8,
+    pub current_inst: InstructionFormat,
+    pub current_inst_cycles: i32,
+    pub imm16: Option<u16>,
+    pub last_inst: InstructionFormat,
     pub cycles: u32,
     pub serial_out: Vec<u8>,
 }
@@ -107,8 +120,10 @@ impl MCU {
             skip_flag: false,
             carry: 0,
             cycles: 0,
-            last_inst: 0,
-            instruction_phase: 0,
+            current_inst: InstructionFormat::trap(),
+            current_inst_cycles: 0,
+            imm16: None,
+            last_inst: InstructionFormat::trap(),
             serial_out: Vec::new(),
         }
     }
@@ -166,11 +181,31 @@ impl MCU {
             return;
         }
 
-        let current_inst = if self.instruction_phase == 0 {
-            self.fetch_next_rom_word()
+        if self.current_inst_cycles == 0 {
+            self.current_inst = isa::decode_instruction(self.fetch_next_rom_word());
+            if self.skip_flag {
+                if self.current_inst.has_immediate_value() {
+                    self.fetch_next_rom_word();
+                }
+                self.current_inst_cycles = 0;
+                if self.current_inst.resets_skip_flag() {
+                    self.skip_flag = false;
+                }
+                return;
+            }
+            self.current_inst_cycles = self.current_inst.cycles();
+            self.imm16 = None;
+            if self.current_inst.has_immediate_value() {
+                return;
+            } else {
+                self.execute_current_instruction();
+            }
         } else {
-            self.last_inst
-        };
+            if self.current_inst.has_immediate_value() && self.imm16.is_none() {
+                self.imm16 = Some(self.fetch_next_rom_word());
+            }
+            self.execute_current_instruction();
+        }
 
         match current_inst {
             0x0000..=0x0FFF => 'misc_block: {
@@ -200,40 +235,40 @@ impl MCU {
 
                 if self.skip_flag {
                     self.skip_flag = false;
-                    if address_mode.has_immediate(){
+                    if address_mode.has_immediate() {
                         self.set_pc(self.pc().wrapping_add(2));
                     }
                     break 'memory_block;
                 }
 
-                let addr = match address_mode{
+                let addr = match address_mode {
                     AddressMode::Register(ri) => self.register[ri],
                     AddressMode::PostIncrement(ri, stride) => {
                         let addr = self.register[ri];
                         self.register[ri] = self.register[ri].wrapping_add(stride);
                         addr
-                    },
+                    }
                     AddressMode::PreDecrement(ri, stride) => {
                         self.register[ri] = self.register[ri].wrapping_sub(stride);
                         self.register[ri]
-                    },
+                    }
                     AddressMode::Offset(ri) => {
-                        if self.instruction_phase == 0 {
-                            self.instruction_phase += 1;
+                        if self.current_inst_cycles == 0 {
+                            self.current_inst_cycles += 1;
                             break 'memory_block;
                         }
                         self.register[ri].wrapping_add(self.fetch_next_rom_word())
-                    },
+                    }
                     AddressMode::Absolute => {
-                        if self.instruction_phase == 0 {
-                            self.instruction_phase += 1;
+                        if self.current_inst_cycles == 0 {
+                            self.current_inst_cycles += 1;
                             break 'memory_block;
                         }
                         self.fetch_next_rom_word()
-                    },
+                    }
                     AddressMode::Reserved => todo!(),
                 };
-                self.instruction_phase = 0;
+                self.current_inst_cycles = 0;
 
                 if self.skip_flag {
                     self.skip_flag = false;
@@ -245,15 +280,15 @@ impl MCU {
                 let p = match decode_parameter(current_inst) {
                     Parameter::Register(ri) => self.register[ri],
                     Parameter::Immediate => {
-                        if self.instruction_phase == 0 {
-                            self.instruction_phase += 1;
+                        if self.current_inst_cycles == 0 {
+                            self.current_inst_cycles += 1;
                             break 'alu_block;
                         }
                         self.fetch_next_rom_word()
                     }
                     Parameter::Value(p) => p,
                 } as u32;
-                self.instruction_phase = 0;
+                self.current_inst_cycles = 0;
 
                 if self.skip_flag {
                     self.skip_flag = false;
@@ -299,15 +334,15 @@ impl MCU {
                 let p = match decode_parameter(current_inst) {
                     Parameter::Register(ri) => self.register[ri],
                     Parameter::Immediate => {
-                        if self.instruction_phase == 0 {
-                            self.instruction_phase += 1;
+                        if self.current_inst_cycles == 0 {
+                            self.current_inst_cycles += 1;
                             break 'if_block;
                         }
                         self.fetch_next_rom_word()
                     }
                     Parameter::Value(p) => p,
                 };
-                self.instruction_phase = 0;
+                self.current_inst_cycles = 0;
 
                 if self.skip_flag {
                     // if instructions dont reset the skip flag to allow chaining
@@ -347,514 +382,109 @@ impl MCU {
                 todo!("trap for invalid instruction")
             }
         };
-
-        self.last_inst = current_inst;
     }
 
-    // pub fn run_one_cycle_old(&mut self) {
-    //     if self.is_halted() {
-    //         return;
-    //     }
-    //
-    //     match self.in_flight_op {
-    //         None => {
-    //             let inst = self.fetch_next_rom_word();
-    //             let ra = (inst >> 4 & 0x000F) as usize;
-    //             let rb = (inst & 0x000F) as usize;
-    //             let imm4 = inst & 0x000F;
-    //             match inst {
-    //                 // Noop
-    //                 0x0000 => (),
-    //                 // CALL imm
-    //                 0x0010..=0x001F => self.in_flight_op = Some(InFlightOp::CALL_IMM),
-    //                 // CALL reg
-    //                 0x0020..=0x002F => {
-    //                     let a = if ra == 0 { 0 } else { self.register[ra] };
-    //                     self.register[14] = self.register[14].wrapping_sub(2);
-    //                     let bytes = self.register[15].to_le_bytes();
-    //                     self.ram[self.register[14] as usize] = bytes[0];
-    //                     self.ram[self.register[14] as usize + 1] = bytes[1];
-    //                     self.register[15] = a;
-    //                 }
-    //                 // RET
-    //                 0x0030..=0x003F => {
-    //                     let sp = self.register[14] as usize;
-    //                     let v = u16::from_le_bytes(self.ram[sp..sp + 2].try_into().unwrap());
-    //                     self.register[15] = v;
-    //                     self.set_flags_on_write(v);
-    //                     self.register[14] = self.register[14].wrapping_add(2);
-    //                 }
-    //                 // DBG
-    //                 0x00BB => {
-    //                     self.set_dbg_flag();
-    //                 }
-    //                 // HALT
-    //                 0x0FFF => {
-    //                     self.set_halted();
-    //                 }
-    //                 // LDW, LDB, LDS
-    //                 0x1000..=0x1FFF => {
-    //                     let signed = inst & 0x0800 != 0;
-    //                     let byte_mode = inst & 0x0400 != 0;
-    //                     let address_mode = inst >> 8 & 0x0003;
-    //                     let mut addr = if rb == 0 { 0 } else { self.register[rb] };
-    //                     if address_mode == 3 {
-    //                         self.in_flight_op = Some(InFlightOp::LD_IMM {
-    //                             signed,
-    //                             byte_mode,
-    //                             dst: ra,
-    //                             base_addr: addr,
-    //                         });
-    //                     } else {
-    //                         if address_mode == 2 {
-    //                             addr = addr.wrapping_sub(if byte_mode { 1 } else { 2 });
-    //                             self.register[rb] = addr;
-    //                         }
-    //                         let value = self.load_from_ram(addr, byte_mode, signed);
-    //                         if address_mode == 1 {
-    //                             addr = addr.wrapping_add(if byte_mode { 1 } else { 2 });
-    //                             self.register[rb] = addr;
-    //                         }
-    //                         self.register[ra] = value;
-    //                         self.set_flags_on_write(value);
-    //                     }
-    //                 }
-    //                 // LRW, LRB, LRS
-    //                 0x2000..=0x2FFF => {
-    //                     let signed = inst & 0x0800 != 0;
-    //                     let byte_mode = inst & 0x0400 != 0;
-    //                     let address_mode = inst >> 8 & 0x0003;
-    //                     let mut addr = if rb == 0 { 0 } else { self.register[rb] };
-    //                     if address_mode == 3 {
-    //                         self.in_flight_op = Some(InFlightOp::LR_IMM {
-    //                             signed,
-    //                             byte_mode,
-    //                             dst: ra,
-    //                             base_addr: addr,
-    //                         })
-    //                     } else {
-    //                         if address_mode == 2 {
-    //                             addr = addr.wrapping_sub(if byte_mode { 1 } else { 2 });
-    //                             self.register[rb] = addr;
-    //                         }
-    //                         let raw = self.read_rom(addr);
-    //                         let value = if byte_mode {
-    //                             let value = if addr & 0x0001 != 0 {
-    //                                 raw >> 8
-    //                             } else {
-    //                                 raw & 0x00FF
-    //                             } as u8;
-    //                             if signed {
-    //                                 value as i8 as u16
-    //                             } else {
-    //                                 value as u16
-    //                             }
-    //                         } else {
-    //                             raw
-    //                         };
-    //                         if address_mode == 1 {
-    //                             addr = addr.wrapping_add(if byte_mode { 1 } else { 2 });
-    //                             self.register[rb] = addr;
-    //                         }
-    //                         self.register[ra] = value;
-    //                         self.set_flags_on_write(value);
-    //                     }
-    //                 }
-    //                 // STW, STB
-    //                 0x3000..=0x37FF => {
-    //                     let byte_mode = inst & 0x0400 != 0;
-    //                     let address_mode = inst >> 8 & 0x0003;
-    //                     let mut addr = if ra == 0 { 0 } else { self.register[ra] };
-    //                     let value = if rb == 0 { 0 } else { self.register[rb] };
-    //                     if address_mode == 3 {
-    //                         self.in_flight_op = Some(InFlightOp::ST_IMM {
-    //                             byte_mode,
-    //                             base_addr: addr,
-    //                             value,
-    //                         });
-    //                     } else {
-    //                         if address_mode == 2 {
-    //                             addr = addr.wrapping_sub(if byte_mode { 1 } else { 2 });
-    //                             self.register[ra] = addr;
-    //                         }
-    //                         self.write_ram(addr, value, byte_mode);
-    //                         if address_mode == 1 {
-    //                             addr = addr.wrapping_add(if byte_mode { 1 } else { 2 });
-    //                             self.register[ra] = addr;
-    //                         }
-    //                     }
-    //                 }
-    //                 // LDI_IMM
-    //                 0x4000..=0x40FF => {
-    //                     self.in_flight_op = Some(InFlightOp::LDI_IMM { dst: ra });
-    //                 }
-    //                 // LDI_POS
-    //                 0x4100..=0x41FF => {
-    //                     self.register[ra] = imm4;
-    //                     self.set_flags_on_write(imm4);
-    //                 }
-    //                 // LDI_NEG
-    //                 0x4200..=0x42FF => {
-    //                     let v = !imm4 + 1;
-    //                     self.register[ra] = v;
-    //                     self.set_flags_on_write(v);
-    //                 }
-    //                 // MOV
-    //                 0x4300..=0x43FF => {
-    //                     let v = if rb == 0 { 0 } else { self.register[rb] };
-    //                     self.register[ra] = v;
-    //                     self.set_flags_on_write(v);
-    //                 }
-    //                 // PUSH
-    //                 0x4E00..=0x4EFF => {
-    //                     self.register[14] = self.register[14].wrapping_sub(2);
-    //                     let v = if ra == 0 { 0 } else { self.register[ra] };
-    //                     let bytes = v.to_le_bytes();
-    //                     self.ram[self.register[14] as usize] = bytes[0];
-    //                     self.ram[self.register[14] as usize + 1] = bytes[1];
-    //                 }
-    //                 // POP
-    //                 0x4F00..=0x4FFF => {
-    //                     let sp = self.register[14] as usize;
-    //                     let v = u16::from_le_bytes(self.ram[sp..sp + 2].try_into().unwrap());
-    //                     self.register[ra] = v;
-    //                     self.set_flags_on_write(v);
-    //                     self.register[14] = self.register[14].wrapping_add(2);
-    //                 }
-    //                 //JMP_IMM
-    //                 0x5000..=0x50FF => {
-    //                     self.in_flight_op = Some(InFlightOp::JMP_IMM);
-    //                 }
-    //                 // JMP_REG
-    //                 0x5100..=0x51FF => {
-    //                     let a = if ra == 0 { 0 } else { self.register[ra] };
-    //                     self.register[15] = a;
-    //                 }
-    //                 // JMP_OFF
-    //                 0x5200..=0x52FF => {
-    //                     let offset = ((inst & 0x00FF) as i8 as i16 * 2) as u16;
-    //                     self.register[15] = self.register[15].wrapping_add(offset);
-    //                 }
-    //                 // JE
-    //                 0x5300..=0x53FF => {
-    //                     if self.is_zero_flag_set() {
-    //                         let offset = ((inst & 0x00FF) as i8 as i16 * 2) as u16;
-    //                         self.register[15] = self.register[15].wrapping_add(offset);
-    //                     }
-    //                 }
-    //                 // JNE
-    //                 0x5400..=0x54FF => {
-    //                     if !self.is_zero_flag_set() {
-    //                         let offset = ((inst & 0x00FF) as i8 as i16 * 2) as u16;
-    //                         self.register[15] = self.register[15].wrapping_add(offset);
-    //                     }
-    //                 }
-    //                 // JL
-    //                 0x5500..=0x55FF => {
-    //                     if self.is_negative_flag_set() != self.is_overflow_flag_set() {
-    //                         let offset = ((inst & 0x00FF) as i8 as i16 * 2) as u16;
-    //                         self.register[15] = self.register[15].wrapping_add(offset);
-    //                     }
-    //                 }
-    //                 // JLE
-    //                 0x5600..=0x56FF => {
-    //                     if self.is_negative_flag_set() != self.is_overflow_flag_set()
-    //                         || self.is_zero_flag_set()
-    //                     {
-    //                         let offset = ((inst & 0x00FF) as i8 as i16 * 2) as u16;
-    //                         self.register[15] = self.register[15].wrapping_add(offset);
-    //                     }
-    //                 }
-    //                 // JG
-    //                 0x5700..=0x57FF => {
-    //                     if self.is_negative_flag_set() == self.is_overflow_flag_set()
-    //                         && !self.is_zero_flag_set()
-    //                     {
-    //                         let offset = ((inst & 0x00FF) as i8 as i16 * 2) as u16;
-    //                         self.register[15] = self.register[15].wrapping_add(offset);
-    //                     }
-    //                 }
-    //                 // JGE
-    //                 0x5800..=0x58FF => {
-    //                     if self.is_negative_flag_set() == self.is_overflow_flag_set() {
-    //                         let offset = ((inst & 0x00FF) as i8 as i16 * 2) as u16;
-    //                         self.register[15] = self.register[15].wrapping_add(offset);
-    //                     }
-    //                 }
-    //                 // JB
-    //                 0x5900..=0x59FF => {
-    //                     if self.is_carry_flag_set() {
-    //                         let offset = ((inst & 0x00FF) as i8 as i16 * 2) as u16;
-    //                         self.register[15] = self.register[15].wrapping_add(offset);
-    //                     }
-    //                 }
-    //                 // JBE
-    //                 0x5A00..=0x5AFF => {
-    //                     if self.is_carry_flag_set() || self.is_zero_flag_set() {
-    //                         let offset = ((inst & 0x00FF) as i8 as i16 * 2) as u16;
-    //                         self.register[15] = self.register[15].wrapping_add(offset);
-    //                     }
-    //                 }
-    //                 // JA
-    //                 0x5B00..=0x5BFF => {
-    //                     if !self.is_carry_flag_set() && !self.is_zero_flag_set() {
-    //                         let offset = ((inst & 0x00FF) as i8 as i16 * 2) as u16;
-    //                         self.register[15] = self.register[15].wrapping_add(offset);
-    //                     }
-    //                 }
-    //                 // JAE
-    //                 0x5C00..=0x5CFF => {
-    //                     if !self.is_carry_flag_set() {
-    //                         let offset = ((inst & 0x00FF) as i8 as i16 * 2) as u16;
-    //                         self.register[15] = self.register[15].wrapping_add(offset);
-    //                     }
-    //                 }
-    //                 // ADD
-    //                 0x6000..=0x60FF => {
-    //                     let a = if ra == 0 { 0 } else { self.register[ra] };
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let (result, carry) = a.overflowing_add(b);
-    //                     let overflow = ((a ^ result) & (b ^ result)) >> 15 != 0;
-    //                     self.register[ra] = result;
-    //                     self.set_flags(result == 0, result & 0x8000 != 0, carry, overflow);
-    //                 }
-    //                 // ADDC
-    //                 0x6100..=0x61FF => {
-    //                     let carry_value = if self.is_carry_flag_set() { 1 } else { 0 };
-    //                     let a = if ra == 0 { 0 } else { self.register[ra] };
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let (sub_result, carry_1) = a.overflowing_add(carry_value);
-    //                     let (result, carry_2) = sub_result.overflowing_add(b);
-    //                     let overflow = ((a ^ result) & (b ^ result)) >> 15 != 0;
-    //                     self.register[ra] = result;
-    //                     self.set_flags(
-    //                         result == 0,
-    //                         result & 0x8000 != 0,
-    //                         carry_2 || carry_1,
-    //                         overflow,
-    //                     );
-    //                 }
-    //                 // SUB
-    //                 0x6200..=0x62FF => {
-    //                     let a = if ra == 0 { 0 } else { self.register[ra] };
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let (result, carry) = a.overflowing_sub(b);
-    //                     let overflow = (a ^ b) & (a ^ result) & 0x8000 != 0;
-    //                     self.register[ra] = result;
-    //                     self.set_flags(result == 0, result & 0x8000 != 0, carry, overflow);
-    //                 }
-    //                 // SUBC
-    //                 0x6300..=0x63FF => {
-    //                     let carry_value = if self.is_carry_flag_set() { 1 } else { 0 };
-    //                     let a = if ra == 0 { 0 } else { self.register[ra] };
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let (sub_result, carry_1) = a.overflowing_sub(carry_value);
-    //                     let (result, carry_2) = sub_result.overflowing_sub(b);
-    //                     let overflow = (a ^ b) & (a ^ result) & 0x8000 != 0;
-    //                     self.register[ra] = result;
-    //                     self.set_flags(
-    //                         result == 0,
-    //                         result & 0x8000 != 0,
-    //                         carry_2 || carry_1,
-    //                         overflow,
-    //                     );
-    //                 }
-    //                 // AND
-    //                 0x6400..=0x64FF => {
-    //                     let a = if ra == 0 { 0 } else { self.register[ra] };
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let result = a & b;
-    //                     self.register[ra] = result;
-    //                     self.set_flags(result == 0, result & 0x8000 != 0, false, false);
-    //                 }
-    //                 // Or
-    //                 0x6500..=0x65FF => {
-    //                     let a = if ra == 0 { 0 } else { self.register[ra] };
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let result = a | b;
-    //                     self.register[ra] = result;
-    //                     self.set_flags(result == 0, result & 0x8000 != 0, false, false);
-    //                 }
-    //                 // XOR
-    //                 0x6600..=0x66FF => {
-    //                     let a = if ra == 0 { 0 } else { self.register[ra] };
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let result = a ^ b;
-    //                     self.register[ra] = result;
-    //                     self.set_flags(result == 0, result & 0x8000 != 0, false, false);
-    //                 }
-    //                 // SHL
-    //                 0x6700..=0x67FF => {
-    //                     let a = if ra == 0 { 0 } else { self.register[ra] };
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let shift_amount = b & 0x000F;
-    //                     let result = a << shift_amount;
-    //                     self.register[ra] = result;
-    //                     self.set_flags(
-    //                         result == 0,
-    //                         result & 0x8000 != 0,
-    //                         a >> (16 - shift_amount) != 0,
-    //                         (a & 0x8000) != (result & 0x8000),
-    //                     );
-    //                 }
-    //                 // SHR
-    //                 0x6800..=0x68FF => {
-    //                     let a = if ra == 0 { 0 } else { self.register[ra] };
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let shift_amount = b & 0x000F;
-    //                     let result = a >> shift_amount;
-    //                     self.register[ra] = result;
-    //                     self.set_flags(
-    //                         result == 0,
-    //                         false,
-    //                         a.unbounded_shl((16 - shift_amount) as u32) != 0,
-    //                         (a & 0x8000) != (result & 0x8000),
-    //                     );
-    //                 }
-    //                 // ASR
-    //                 0x6900..=0x69FF => {
-    //                     let a = if ra == 0 { 0 } else { self.register[ra] };
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let shift_amount = b & 0x000F;
-    //                     let fill = 0xFFFF << (16 - shift_amount);
-    //                     let result = (a >> shift_amount) | fill;
-    //                     self.register[ra] = result;
-    //                     self.set_flags(
-    //                         result == 0,
-    //                         false,
-    //                         a << (16 - shift_amount) != 0,
-    //                         (a & 0x8000) != (result & 0x8000),
-    //                     );
-    //                 }
-    //                 // CMP
-    //                 0x6A00..=0x6AFF => {
-    //                     let a = if ra == 0 { 0 } else { self.register[ra] };
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let (result, carry) = a.overflowing_sub(b);
-    //                     let overflow = (a ^ b) & (a ^ result) & 0x8000 != 0;
-    //                     self.set_flags(result == 0, result & 0x8000 != 0, carry, overflow);
-    //                 }
-    //                 // NEG
-    //                 0x6F00..=0x6F0F => {
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let result = (!b).wrapping_add(1);
-    //                     self.register[rb] = result;
-    //                     self.set_flags(result == 0, result & 0x8000 != 0, b & 0x8000 != 0, false);
-    //                 }
-    //                 // NOT
-    //                 0x6F10..=0x6F1F => {
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let result = !b;
-    //                     self.register[ra] = result;
-    //                     self.set_flags(result == 0, result & 0x8000 != 0, false, false);
-    //                 }
-    //                 // INCB
-    //                 0x6F20..=0x6F2F => {
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let (result, carry) = b.overflowing_add(1);
-    //                     self.register[rb] = result;
-    //                     self.set_flags(
-    //                         result == 0,
-    //                         result & 0x8000 != 0,
-    //                         carry,
-    //                         (result ^ b) & 0x8000 != 0,
-    //                     );
-    //                 }
-    //                 // INCW
-    //                 0x6F30..=0x6F3F => {
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let (result, carry) = b.overflowing_add(2);
-    //                     self.register[rb] = result;
-    //                     self.set_flags(
-    //                         result == 0,
-    //                         result & 0x8000 != 0,
-    //                         carry,
-    //                         (result ^ b) & 0x8000 != 0,
-    //                     );
-    //                 }
-    //                 // DECB
-    //                 0x6F40..=0x6F4F => {
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let (result, carry) = b.overflowing_sub(1);
-    //                     self.register[rb] = result;
-    //                     self.set_flags(
-    //                         result == 0,
-    //                         result & 0x8000 != 0,
-    //                         carry,
-    //                         (result ^ b) & 0x8000 != 0,
-    //                     );
-    //                 }
-    //                 // DECW
-    //                 0x6F50..=0x6F5F => {
-    //                     let b = if rb == 0 { 0 } else { self.register[rb] };
-    //                     let (result, carry) = b.overflowing_sub(2);
-    //                     self.register[rb] = result;
-    //                     self.set_flags(
-    //                         result == 0,
-    //                         result & 0x8000 != 0,
-    //                         carry,
-    //                         (result ^ b) & 0x8000 != 0,
-    //                     );
-    //                 }
-    //                 _ => panic!("instruction {inst:#06x} not implemented"),
-    //             }
-    //             self.last_inst = inst;
-    //         }
-    //         Some(InFlightOp::LDI_IMM { dst }) => {
-    //             let imm16 = self.fetch_next_rom_word();
-    //             self.register[dst] = imm16;
-    //             self.set_flags_on_write(imm16);
-    //             self.in_flight_op = None;
-    //         }
-    //         Some(InFlightOp::CALL_IMM) => {
-    //             let addr = self.fetch_next_rom_word();
-    //             self.register[14] = self.register[14].wrapping_sub(2);
-    //             let bytes = self.register[15].to_le_bytes();
-    //             self.ram[self.register[14] as usize] = bytes[0];
-    //             self.ram[self.register[14] as usize + 1] = bytes[1];
-    //             self.register[15] = addr;
-    //             self.in_flight_op = None;
-    //         }
-    //         Some(InFlightOp::JMP_IMM) => {
-    //             let addr = self.fetch_next_rom_word();
-    //             self.register[15] = addr;
-    //             self.in_flight_op = None;
-    //         }
-    //         Some(InFlightOp::LD_IMM {
-    //             signed,
-    //             byte_mode,
-    //             dst,
-    //             base_addr,
-    //         }) => {
-    //             let offset = self.fetch_next_rom_word();
-    //             let value = self.load_from_ram(base_addr.wrapping_add(offset), byte_mode, signed);
-    //             self.register[dst] = value;
-    //             self.set_flags_on_write(value);
-    //             self.in_flight_op = None;
-    //         }
-    //         Some(InFlightOp::LR_IMM {
-    //             signed,
-    //             byte_mode,
-    //             dst,
-    //             base_addr,
-    //         }) => {
-    //             let offset = self.fetch_next_rom_word();
-    //             let value = self.load_from_rom(base_addr.wrapping_add(offset), byte_mode, signed);
-    //             self.register[dst] = value;
-    //             self.set_flags_on_write(value);
-    //         }
-    //         Some(InFlightOp::ST_IMM {
-    //             byte_mode,
-    //             base_addr,
-    //             value,
-    //         }) => {
-    //             let offset = self.fetch_next_rom_word();
-    //             self.write_ram(base_addr.wrapping_add(offset), value, byte_mode);
-    //             self.in_flight_op = None;
-    //         }
-    //     }
-    //     self.cycles = self.cycles.wrapping_add(1);
-    // }
+    pub fn execute_current_instruction(&mut self) {
+        self.current_inst_cycles -= 1;
+        if self.current_inst_cycles > 0 {
+            return;
+        }
+
+        match &self.current_inst {
+            InstructionFormat::Misc(misc) => match misc.opcode {
+                MiscOpcode::TRAP => todo!(),
+                MiscOpcode::CLI => todo!(),
+                MiscOpcode::STI => todo!(),
+                MiscOpcode::IRET => todo!(),
+                MiscOpcode::RET => todo!(),
+                MiscOpcode::CALLI => todo!(),
+                MiscOpcode::DBG => todo!(),
+                MiscOpcode::HALT => todo!(),
+                MiscOpcode::INT => todo!(),
+                MiscOpcode::CALLR => todo!(),
+                MiscOpcode::NEG => todo!(),
+            },
+            InstructionFormat::Memory(memory) => match memory.opcode {
+                MemoryOpcode::LDX => todo!(),
+                MemoryOpcode::LRX => todo!(),
+                MemoryOpcode::STX => todo!(),
+            },
+            InstructionFormat::Alu(alu) => {
+                let p = match alu.parameter {
+                    isa::Parameter::Register(ri) => self.register[ri],
+                    isa::Parameter::Immediate => {
+                        self.imm16.expect("Should have an immediate value")
+                    }
+                    isa::Parameter::Value(v) => v,
+                };
+                let r = self.register[alu.register];
+                self.register[alu.register] = match alu.opcode {
+                    AluOpcode::ADD => {
+                        let (result, carry) = r.overflowing_add(p);
+                        // TODO: handle the carry correctly
+                        result
+                    },
+                    AluOpcode::ADDC => {
+                        let (result_a, carry_a) = r.overflowing_add(p);
+                        let (result_b, carry_b) = result_a.overflowing_add(self.carry);
+                        // TODO: handle the carry correctly
+                        // If either carry_a or carry_b is true the the carry is just 0b01
+                        // If both are true then the carry is 0b10
+                        result_b
+                    },
+                    AluOpcode::SUB => {
+                        let (result, carry) = r.overflowing_sub(p);
+                        // TODO: handle the carry correctly
+                        result
+                    },
+                    AluOpcode::SUBC => todo!(),
+                    AluOpcode::MUL => todo!(),
+                    AluOpcode::MULS => todo!(),
+                    AluOpcode::DIV => todo!(),
+                    AluOpcode::DIVS => todo!(),
+                    AluOpcode::SHL => todo!(),
+                    AluOpcode::SHLC => todo!(),
+                    AluOpcode::SHR => todo!(),
+                    AluOpcode::SHRC => todo!(),
+                    AluOpcode::SHA => todo!(),
+                    AluOpcode::MOV => p,
+                    AluOpcode::AND => r & p,
+                    AluOpcode::OR => r | p,
+                    AluOpcode::XOR => r ^ p,
+                    AluOpcode::BCL => r & !p,
+                }
+            }
+            InstructionFormat::If(iff) => {
+                let p = match iff.parameter {
+                    isa::Parameter::Register(ri) => self.register[ri],
+                    isa::Parameter::Immediate => {
+                        self.imm16.expect("Should have an immediate value")
+                    }
+                    isa::Parameter::Value(v) => v,
+                };
+                let r = self.register[iff.register];
+                self.skip_flag = match iff.opcode {
+                    IfOpcode::IFE => r == p,
+                    IfOpcode::IFNE => r != p,
+                    IfOpcode::IFL => (r as i16) < (p as i16),
+                    IfOpcode::IFLE => (r as i16) <= (p as i16),
+                    IfOpcode::IFG => (r as i16) > (p as i16),
+                    IfOpcode::IFGE => (r as i16) >= (p as i16),
+                    IfOpcode::IFB => r < p,
+                    IfOpcode::IFBE => r <= p,
+                    IfOpcode::IFA => r > p,
+                    IfOpcode::IFAE => r >= p,
+                };
+            }
+            InstructionFormat::Offset(offset) => match offset.opcode {
+                OffsetOpcode::JMP => todo!(),
+                OffsetOpcode::CALL => todo!(),
+            },
+            InstructionFormat::Error(_) => todo!(),
+        }
+
+        self.last_inst = self.current_inst;
+    }
 
     fn load_from_ram(&self, addr: u16, byte_mode: bool, signed: bool) -> u16 {
         let raw = self.read_ram_byte(addr);
@@ -1086,17 +716,17 @@ fn decode_parameter(instruction_word: u16) -> Parameter {
     }
 }
 
-enum AddressMode{
+enum AddressMode {
     Register(usize),
     PostIncrement(usize, u16),
     PreDecrement(usize, u16),
     Offset(usize),
     Absolute,
-    Reserved
+    Reserved,
 }
-impl AddressMode{
+impl AddressMode {
     fn has_immediate(&self) -> bool {
-        match self{
+        match self {
             AddressMode::Register(_) => false,
             AddressMode::PostIncrement(_, _) => false,
             AddressMode::PreDecrement(_, _) => false,
